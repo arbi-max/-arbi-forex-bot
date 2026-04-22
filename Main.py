@@ -1,6 +1,6 @@
 import requests
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 TOKEN = "8636672541:AAElNEq4IKwrRzTLuqoaqttadmkGKAVEVlM"
 IDS = ["525011337", "7276558677"]
@@ -10,6 +10,10 @@ PAIRS = [
     {"name": "GBP/USD", "kraken": "GBPUSD"},
     {"name": "USD/JPY", "kraken": "USDJPY"},
 ]
+
+# Anti-contradiction : garde le dernier signal par paire
+last_signals = {}
+open_positions = {}
 
 def send(msg):
     for cid in IDS:
@@ -21,6 +25,70 @@ def send(msg):
             pass
         time.sleep(1)
 
+# ═══════════════════════════════════
+# CALENDRIER ÉCONOMIQUE
+# ═══════════════════════════════════
+def get_news_events():
+    try:
+        # ForexFactory RSS feed
+        r = requests.get(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            timeout=10)
+        events = r.json()
+        high_impact = []
+        now = datetime.now(timezone.utc)
+        for e in events:
+            if e.get("impact") in ["High", "Medium"]:
+                try:
+                    event_time = datetime.strptime(
+                        e["date"], "%Y-%m-%dT%H:%M:%S%z")
+                    diff = abs((event_time - now).total_seconds() / 60)
+                    if diff <= 45:  # Dans les 45 minutes
+                        high_impact.append({
+                            "title": e.get("title", ""),
+                            "currency": e.get("country", ""),
+                            "time": event_time,
+                            "impact": e.get("impact", ""),
+                            "diff_mins": int(diff)
+                        })
+                except:
+                    pass
+        return high_impact
+    except:
+        return []
+
+def is_news_blocked(pair_name):
+    events = get_news_events()
+    if not events:
+        return False, []
+
+    currencies = []
+    if "EUR" in pair_name: currencies += ["EUR", "USD"]
+    if "GBP" in pair_name: currencies += ["GBP", "USD"]
+    if "JPY" in pair_name: currencies += ["JPY", "USD"]
+
+    blocking = []
+    for e in events:
+        for cur in currencies:
+            if cur.upper() in e["currency"].upper():
+                blocking.append(e)
+                break
+
+    return len(blocking) > 0, blocking
+
+# ═══════════════════════════════════
+# SESSION DE TRADING
+# ═══════════════════════════════════
+def get_session():
+    hour = datetime.now(timezone.utc).hour
+    if 7 <= hour < 12:   return "Londres", True
+    if 12 <= hour < 16:  return "Londres+NewYork", True
+    if 16 <= hour < 21:  return "New York", True
+    return "Hors session", False
+
+# ═══════════════════════════════════
+# DONNÉES KRAKEN
+# ═══════════════════════════════════
 def candles(pair, interval=60, count=150):
     try:
         r = requests.get("https://api.kraken.com/0/public/OHLC",
@@ -38,6 +106,9 @@ def candles(pair, interval=60, count=150):
     except:
         return None
 
+# ═══════════════════════════════════
+# INDICATEURS
+# ═══════════════════════════════════
 def ema(closes, n):
     if len(closes) < n:
         return closes[-1]
@@ -53,8 +124,7 @@ def rsi(closes, n=14):
         d = closes[i]-closes[i-1]
         if d > 0: g += d
         else: l -= d
-    rs = g/(l or 0.001)
-    return 100 - 100/(1+rs)
+    return 100 - 100/(1+g/(l or 0.001))
 
 def macd(closes):
     return ema(closes, 12) - ema(closes, 26)
@@ -80,37 +150,18 @@ def atr(highs, lows, closes, n=14):
         trs.append(tr)
     return sum(trs[-n:])/n
 
-def is_trading_session():
-    hour = datetime.now(timezone.utc).hour
-    # Session Londres (07h-16h UTC) + New York (12h-21h UTC)
-    london = 7 <= hour < 16
-    newyork = 12 <= hour < 21
-    return london or newyork
-
-def session_name():
-    hour = datetime.now(timezone.utc).hour
-    if 7 <= hour < 12: return "Londres"
-    if 12 <= hour < 16: return "Londres+NewYork"
-    if 16 <= hour < 21: return "New York"
-    return "Hors session"
-
-def volume_surge(vols):
-    avg = sum(vols[-20:])/20
-    return vols[-1] > avg * 1.5
-
+# ═══════════════════════════════════
+# ANALYSE PRINCIPALE
+# ═══════════════════════════════════
 def analyze(pair_name, kraken_pair):
-    # H1 data
     d1 = candles(kraken_pair, 60, 150)
-    if not d1: return None
-
-    # H4 data (tendance longue)
     d4 = candles(kraken_pair, 240, 100)
-    if not d4: return None
+    if not d1 or not d4:
+        return None
 
     c1 = d1["close"]
     price = c1[-1]
 
-    # Indicateurs H1
     e9   = ema(c1, 9)
     e21  = ema(c1, 21)
     e50  = ema(c1, 50)
@@ -119,16 +170,13 @@ def analyze(pair_name, kraken_pair):
     m    = macd(c1)
     bb_u, bb_l, bb_m = bollinger(c1)
     sto  = stochastic(d1["high"], d1["low"], c1)
-    atr_val = atr(d1["high"], d1["low"], c1)
-    vol_up  = volume_surge(d1["vol"])
+    atr_v = atr(d1["high"], d1["low"], c1)
 
-    # Tendance H4
-    c4   = d4["close"]
-    e9_4 = ema(c4, 9)
-    e21_4= ema(c4, 21)
+    c4    = d4["close"]
+    e9_4  = ema(c4, 9)
+    e21_4 = ema(c4, 21)
     trend_h4 = "BULL" if e9_4 > e21_4 else "BEAR"
 
-    # Croisement EMA H1
     c1_prev = c1[:-1]
     cross_up   = ema(c1_prev, 9) <= ema(c1_prev, 21) and e9 > e21
     cross_down = ema(c1_prev, 9) >= ema(c1_prev, 21) and e9 < e21
@@ -136,160 +184,135 @@ def analyze(pair_name, kraken_pair):
     score = 0
     reasons = []
 
-    # 1. RSI
-    if r < 30:
-        score += 3
-        reasons.append("RSI survendu (<30)")
-    elif r < 40:
-        score += 1
-        reasons.append("RSI bas (40)")
-    elif r > 70:
-        score -= 3
-        reasons.append("RSI surachete (>70)")
-    elif r > 60:
-        score -= 1
-        reasons.append("RSI eleve (>60)")
+    # RSI
+    if r < 30:   score += 3; reasons.append("RSI survendu (<30)")
+    elif r < 40: score += 1; reasons.append("RSI bas (<40)")
+    elif r > 70: score -= 3; reasons.append("RSI surachete (>70)")
+    elif r > 60: score -= 1; reasons.append("RSI eleve (>60)")
 
-    # 2. EMA alignment H1
-    if e9 > e21 > e50:
-        score += 2
-        reasons.append("EMA alignees hausse")
-    elif e9 < e21 < e50:
-        score -= 2
-        reasons.append("EMA alignees baisse")
+    # EMA H1
+    if e9 > e21 > e50:   score += 2; reasons.append("EMA alignees hausse")
+    elif e9 < e21 < e50: score -= 2; reasons.append("EMA alignees baisse")
 
-    # 3. Tendance H4
-    if trend_h4 == "BULL":
-        score += 2
-        reasons.append("H4 haussier")
-    else:
-        score -= 2
-        reasons.append("H4 baissier")
+    # H4
+    if trend_h4 == "BULL": score += 2; reasons.append("H4 haussier")
+    else:                  score -= 2; reasons.append("H4 baissier")
 
-    # 4. MACD
-    if m > 0:
-        score += 1
-        reasons.append("MACD positif")
-    else:
-        score -= 1
-        reasons.append("MACD negatif")
+    # MACD
+    if m > 0: score += 1; reasons.append("MACD positif")
+    else:     score -= 1; reasons.append("MACD negatif")
 
-    # 5. Bollinger
-    if price < bb_l:
-        score += 2
-        reasons.append("Prix sous BB basse")
-    elif price > bb_u:
-        score -= 2
-        reasons.append("Prix sur BB haute")
+    # Bollinger
+    if price < bb_l:   score += 2; reasons.append("Sous BB basse")
+    elif price > bb_u: score -= 2; reasons.append("Sur BB haute")
 
-    # 6. Stochastique
-    if sto < 20:
-        score += 2
-        reasons.append("Stoch survendu (<20)")
-    elif sto > 80:
-        score -= 2
-        reasons.append("Stoch surachete (>80)")
+    # Stochastique
+    if sto < 20:   score += 2; reasons.append("Stoch survendu")
+    elif sto > 80: score -= 2; reasons.append("Stoch surachete")
 
-    # 7. Croisement EMA
-    if cross_up:
-        score += 2
-        reasons.append("Croisement EMA BULL")
-    elif cross_down:
-        score -= 2
-        reasons.append("Croisement EMA BEAR")
+    # Croisement
+    if cross_up:   score += 2; reasons.append("Croisement EMA BULL")
+    elif cross_down: score -= 2; reasons.append("Croisement EMA BEAR")
 
-    # 8. Volume
-    if vol_up:
-        score += (1 if score > 0 else -1)
-        reasons.append("Volume fort")
+    # EMA200
+    if price > e200: score += 1; reasons.append("Au-dessus EMA200")
+    else:            score -= 1; reasons.append("En-dessous EMA200")
 
-    # 9. Prix au-dessus EMA200
-    if price > e200:
-        score += 1
-        reasons.append("Au-dessus EMA200")
-    else:
-        score -= 1
-        reasons.append("En-dessous EMA200")
-
-    # Signal
-    if score >= 6:
-        signal = "ACHAT"
-    elif score <= -5:
-        signal = "VENTE"
-    else:
-        signal = "ATTENDRE"
+    # Signal — seuil strict
+    if score >= 7:    signal = "ACHAT"
+    elif score <= -6: signal = "VENTE"
+    else:             signal = "ATTENDRE"
 
     confidence = min(92, abs(score) * 7 + 30)
 
-    sl = price - atr_val * 1.5 if signal == "ACHAT" else price + atr_val * 1.5
-    tp = price + atr_val * 3.0 if signal == "ACHAT" else price - atr_val * 3.0
+    sl = price - atr_v * 1.5 if signal == "ACHAT" else price + atr_v * 1.5
+    tp = price + atr_v * 3.0 if signal == "ACHAT" else price - atr_v * 3.0
 
     return {
-        "signal": signal,
-        "score": score,
-        "confidence": confidence,
-        "price": price,
-        "rsi": r,
-        "stoch": sto,
-        "macd": m,
-        "trend_h4": trend_h4,
-        "session": session_name(),
-        "atr": atr_val,
-        "sl": sl,
-        "tp": tp,
-        "reasons": reasons[:5],
+        "signal": signal, "score": score,
+        "confidence": confidence, "price": price,
+        "rsi": r, "stoch": sto, "macd": m,
+        "trend_h4": trend_h4, "atr": atr_v,
+        "sl": sl, "tp": tp, "reasons": reasons[:5],
     }
 
-last_signals = {}
-
+# ═══════════════════════════════════
+# VÉRIFICATION PAR PAIRE
+# ═══════════════════════════════════
 def check(pair):
-    result = analyze(pair["name"], pair["kraken"])
+    name = pair["name"]
+    dec = 3 if "JPY" in name else 5
+
+    # 1. Vérifier session
+    session, active = get_session()
+    if not active:
+        return
+
+    # 2. Vérifier actualités
+    blocked, news = is_news_blocked(name)
+    if blocked:
+        msg = f"⚠️ ALERTE NEWS — {name}\n"
+        for n in news:
+            msg += f"• {n['title']} ({n['currency']}) dans {n['diff_mins']}min\n"
+        msg += "Pas de trade recommandé !"
+        if last_signals.get(name + "_news") != msg:
+            last_signals[name + "_news"] = msg
+            send(msg)
+        return
+
+    # 3. Analyser
+    result = analyze(name, pair["kraken"])
     if not result:
         return
 
     sig = result["signal"]
-    name = pair["name"]
-    dec = 3 if "JPY" in name else 5
 
-    if sig != "ATTENDRE" and last_signals.get(name) != sig:
-        last_signals[name] = sig
-        icon = "BUY" if sig == "ACHAT" else "SELL"
+    # 4. Anti-contradiction
+    if sig != "ATTENDRE":
+        current_pos = open_positions.get(name)
 
-        msg = f"{icon} SIGNAL {sig} — {name}\n"
-        msg += "─────────────────────\n"
-        msg += f"Prix    : {result['price']:.{dec}f}\n"
-        msg += f"SL      : {result['sl']:.{dec}f}\n"
-        msg += f"TP      : {result['tp']:.{dec}f}\n"
-        msg += f"Ratio   : 1:2\n"
-        msg += "─────────────────────\n"
-        msg += f"RSI     : {result['rsi']:.1f}\n"
-        msg += f"Stoch   : {result['stoch']:.1f}\n"
-        msg += f"H4      : {result['trend_h4']}\n"
-        msg += f"Session : {result['session']}\n"
-        msg += f"Score   : {result['score']}/13\n"
-        msg += f"Confiance: {result['confidence']}%\n"
-        msg += "─────────────────────\n"
-        for r in result["reasons"]:
-            msg += f"• {r}\n"
-        msg += "\nSignal indicatif — risque 2% max"
+        # Si signal contraire à position ouverte
+        if current_pos and current_pos != sig:
+            send(f"🔄 FERME TA POSITION {current_pos} sur {name} !\nNouveau signal : {sig}")
 
-        send(msg)
-        print(f"Signal: {name} {sig} conf={result['confidence']}%")
+        # Envoyer seulement si signal différent du dernier
+        if last_signals.get(name) != sig:
+            last_signals[name] = sig
+            open_positions[name] = sig
 
-# Démarrage
+            icon = "BUY" if sig == "ACHAT" else "SELL"
+            msg = f"{icon} SIGNAL {sig} — {name}\n"
+            msg += "─────────────────────\n"
+            msg += f"Prix    : {result['price']:.{dec}f}\n"
+            msg += f"SL      : {result['sl']:.{dec}f}\n"
+            msg += f"TP      : {result['tp']:.{dec}f}\n"
+            msg += f"Ratio   : 1:2\n"
+            msg += "─────────────────────\n"
+            msg += f"RSI     : {result['rsi']:.1f}\n"
+            msg += f"Stoch   : {result['stoch']:.1f}\n"
+            msg += f"H4      : {result['trend_h4']}\n"
+            msg += f"Session : {session}\n"
+            msg += f"Score   : {result['score']}/13\n"
+            msg += f"Confiance: {result['confidence']}%\n"
+            msg += "─────────────────────\n"
+            for r in result["reasons"]:
+                msg += f"• {r}\n"
+            msg += "\nSignal indicatif — risque 2% max"
+            send(msg)
+            print(f"Signal: {name} {sig} {result['confidence']}%")
+
+# ═══════════════════════════════════
+# DÉMARRAGE
+# ═══════════════════════════════════
 now = datetime.now().strftime("%d/%m %H:%M")
-send(f"ARBI BOT PRO DEMARRE — {now}\nSessions: Londres + New York\nPaires: EUR/USD GBP/USD USD/JPY\nAnalyse: H1 + H4 + 9 indicateurs")
-print("Bot Pro demarre")
+send(f"ARBI BOT PRO v3 — {now}\n9 indicateurs + Calendrier news\nSessions: Londres + New York\nAnti-contradiction actif")
+print("Bot Pro v3 demarre")
 
 while True:
-    if is_trading_session():
-        for p in PAIRS:
-            try:
-                check(p)
-            except Exception as e:
-                print(f"Erreur {p['name']}: {e}")
-            time.sleep(3)
-        print(f"Cycle termine - {datetime.now().strftime('%H:%M')}")
-    else:
-        print(f"Hors session - {datetime.now().strftime('%H:%M')}")
+    for p in PAIRS:
+        try:
+            check(p)
+        except Exception as e:
+            print(f"Erreur {p['name']}: {e}")
+        time.sleep(3)
     time.sleep(300)
