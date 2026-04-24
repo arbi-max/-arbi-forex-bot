@@ -9,7 +9,9 @@ IDS = ['525011337', '7276558677']
 
 
 PAIRS = [
-{“name”: “EUR/USD”, “kraken”: “EURUSD”},
+TOKEN = os.environ.get('TOKEN', '')
+IDS = ['525011337', '7276558677']
+
 {“name”: “GBP/USD”, “kraken”: “GBPUSD”},
 {“name”: “USD/JPY”, “kraken”: “USDJPY”},
 {“name”: “XAU/USD”, “kraken”: “XAUUSD”},
