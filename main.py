@@ -3,14 +3,14 @@ import time
 import os
 from datetime import datetime, timezone
 
-TOKEN = os.environ.get('TOKEN', '')
-IDS = ['525011337', '7276558677']
+TOKEN = os.environ.get(‘TOKEN’, ‘’)
+IDS = [‘525011337’, ‘7276558677’]
 
 PAIRS = [
-{‘name’: ‘EUR/USD’, ‘kraken’: ‘EURUSD’},
-{‘name’: ‘GBP/USD’, ‘kraken’: ‘GBPUSD’},
-{‘name’: ‘USD/JPY’, ‘kraken’: ‘USDJPY’},
-{‘name’: ‘XAU/USD’, ‘kraken’: ‘XAUUSD’},
+dict(name=‘EUR/USD’, kraken=‘EURUSD’),
+dict(name=‘GBP/USD’, kraken=‘GBPUSD’),
+dict(name=‘USD/JPY’, kraken=‘USDJPY’),
+dict(name=‘XAU/USD’, kraken=‘XAUUSD’),
 ]
 
 CAPITAL = 10000
@@ -19,37 +19,33 @@ MAX_TRADES = 3
 
 last_signals = {}
 open_positions = {}
-daily = {‘date’: ‘’, ‘count’: 0, ‘losses’: 0}
+daily = dict(date=’’, count=0, losses=0)
 last_news_alert = {}
 last_reset = datetime.now()
 
 def send(msg):
 for cid in IDS:
 try:
-requests.post(
-‘https://api.telegram.org/bot’ + TOKEN + ‘/sendMessage’,
-json={‘chat_id’: cid, ‘text’: msg},
-timeout=10)
+url = ‘https://api.telegram.org/bot’ + TOKEN + ‘/sendMessage’
+requests.post(url, json=dict(chat_id=cid, text=msg), timeout=10)
 except Exception as e:
 print(’Telegram error: ’ + str(e))
 time.sleep(0.5)
 
 def candles(pair, interval=60, count=200):
 try:
-r = requests.get(
-‘https://api.kraken.com/0/public/OHLC’,
-params={‘pair’: pair, ‘interval’: interval},
-timeout=10)
+url = ‘https://api.kraken.com/0/public/OHLC’
+r = requests.get(url, params=dict(pair=pair, interval=interval), timeout=10)
 d = r.json()[‘result’]
 k = [x for x in d if x != ‘last’][0]
 data = d[k][-count:]
-return {
-‘open’:  [float(c[1]) for c in data],
-‘high’:  [float(c[2]) for c in data],
-‘low’:   [float(c[3]) for c in data],
-‘close’: [float(c[4]) for c in data],
-‘vol’:   [float(c[6]) for c in data],
-}
+return dict(
+o=[float(c[1]) for c in data],
+h=[float(c[2]) for c in data],
+l=[float(c[3]) for c in data],
+c=[float(c[4]) for c in data],
+v=[float(c[6]) for c in data],
+)
 except Exception as e:
 print(’OHLC error ’ + pair + ’: ’ + str(e))
 return None
@@ -74,16 +70,16 @@ else:
 lo -= d
 return 100 - 100 / (1 + g / (lo or 0.001))
 
-def rsi_divergence(closes):
+def rsi_div(closes):
 if len(closes) < 40:
-return ‘NONE’
+return 0
 r1 = rsi(closes[-40:-20])
 r2 = rsi(closes[-20:])
 if min(closes[-20:]) < min(closes[-40:-20]) and r2 > r1:
-return ‘BULL’
+return 1
 if max(closes[-20:]) > max(closes[-40:-20]) and r2 < r1:
-return ‘BEAR’
-return ‘NONE’
+return -1
+return 0
 
 def macd(closes):
 if len(closes) < 26:
@@ -96,7 +92,7 @@ mid = sum(s) / len(s)
 std = (sum((x - mid) ** 2 for x in s) / len(s)) ** 0.5
 return mid + 2 * std, mid - 2 * std, mid
 
-def stochastic(highs, lows, closes, n=14):
+def stoch(highs, lows, closes, n=14):
 h = max(highs[-n:])
 l = min(lows[-n:])
 if h == l:
@@ -106,9 +102,7 @@ return 100 * (closes[-1] - l) / (h - l)
 def atr(highs, lows, closes, n=14):
 trs = []
 for i in range(1, len(closes)):
-tr = max(highs[i] - lows[i],
-abs(highs[i] - closes[i - 1]),
-abs(lows[i] - closes[i - 1]))
+tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
 trs.append(tr)
 return sum(trs[-n:]) / n
 
@@ -116,93 +110,70 @@ def swings(highs, lows, lb=5):
 sh = []
 sl = []
 for i in range(lb, len(highs) - lb):
-if all(highs[i] >= highs[i-j] for j in range(1, lb+1)) and   
-all(highs[i] >= highs[i+j] for j in range(1, lb+1)):
+if all(highs[i] >= highs[i-j] for j in range(1, lb+1)) and all(highs[i] >= highs[i+j] for j in range(1, lb+1)):
 sh.append((i, highs[i]))
-if all(lows[i] <= lows[i-j] for j in range(1, lb+1)) and   
-all(lows[i] <= lows[i+j] for j in range(1, lb+1)):
+if all(lows[i] <= lows[i-j] for j in range(1, lb+1)) and all(lows[i] <= lows[i+j] for j in range(1, lb+1)):
 sl.append((i, lows[i]))
 return sh, sl
 
-def market_structure(highs, lows, closes):
+def structure(highs, lows, closes):
 sh, sl = swings(highs, lows)
 if len(sh) < 2 or len(sl) < 2:
-return ‘NEUTRAL’, ‘NONE’, ‘NONE’
+return 0, 0, 0
 hh = sh[-1][1] > sh[-2][1]
 hl = sl[-1][1] > sl[-2][1]
 lh = sh[-1][1] < sh[-2][1]
 ll = sl[-1][1] < sl[-2][1]
 if hh and hl:
-st = ‘BULLISH’
+st = 1
 elif lh and ll:
-st = ‘BEARISH’
+st = -1
 else:
-st = ‘NEUTRAL’
+st = 0
 price = closes[-1]
-bos = ‘NONE’
-choch = ‘NONE’
-if st == ‘BULLISH’ and price > sh[-1][1]:
-bos = ‘BOS_BULL’
-if st == ‘BEARISH’ and price < sl[-1][1]:
-bos = ‘BOS_BEAR’
-if st == ‘BULLISH’ and price < sl[-1][1]:
-choch = ‘CHOCH_BEAR’
-if st == ‘BEARISH’ and price > sh[-1][1]:
-choch = ‘CHOCH_BULL’
+bos = 0
+choch = 0
+if st == 1 and price > sh[-1][1]:
+bos = 1
+if st == -1 and price < sl[-1][1]:
+bos = -1
+if st == 1 and price < sl[-1][1]:
+choch = -1
+if st == -1 and price > sh[-1][1]:
+choch = 1
 return st, bos, choch
 
-def order_blocks(opens, highs, lows, closes, lb=50):
+def ob(opens, highs, lows, closes, lb=50):
 bull = []
 bear = []
 start = max(1, len(closes) - lb)
 for i in range(start, len(closes) - 1):
 if closes[i] < opens[i] and closes[i+1] > highs[i]:
-bull.append({‘h’: highs[i], ‘l’: lows[i], ‘mid’: (highs[i]+lows[i])/2})
+bull.append(dict(h=highs[i], l=lows[i], mid=(highs[i]+lows[i])/2))
 if closes[i] > opens[i] and closes[i+1] < lows[i]:
-bear.append({‘h’: highs[i], ‘l’: lows[i], ‘mid’: (highs[i]+lows[i])/2})
+bear.append(dict(h=highs[i], l=lows[i], mid=(highs[i]+lows[i])/2))
 return bull[-3:], bear[-3:]
 
-def fair_value_gaps(highs, lows, lb=50):
+def fvg(highs, lows, lb=50):
 bull = []
 bear = []
 start = max(0, len(highs) - lb)
 for i in range(start, len(highs) - 2):
 if lows[i+2] > highs[i]:
-bull.append({‘mid’: (lows[i+2]+highs[i])/2})
+bull.append(dict(mid=(lows[i+2]+highs[i])/2))
 if highs[i+2] < lows[i]:
-bear.append({‘mid’: (lows[i]+highs[i+2])/2})
+bear.append(dict(mid=(lows[i]+highs[i+2])/2))
 return bull[-3:], bear[-3:]
 
-def liquidity_sweep(highs, lows, closes):
+def sweep(highs, lows, closes):
 sh, sl = swings(highs, lows)
 if not sh or not sl:
-return False, False
+return 0, 0
 prev = closes[-2]
 price = closes[-1]
-swept_h = prev > sh[-1][1] and price < sh[-1][1]
-swept_l = prev < sl[-1][1] and price > sl[-1][1]
-return swept_h, swept_l
-
-def candle_pattern(opens, highs, lows, closes):
-if len(closes) < 2:
-return ‘NONE’
-body = abs(closes[-1] - opens[-1])
-rng = highs[-1] - lows[-1]
-if rng == 0:
-return ‘NONE’
-lw = min(opens[-1], closes[-1]) - lows[-1]
-uw = highs[-1] - max(opens[-1], closes[-1])
-if lw > body * 2 and uw < body * 0.5:
-return ‘BULL_PIN’
-if uw > body * 2 and lw < body * 0.5:
-return ‘BEAR_PIN’
-if closes[-1] > opens[-1] and closes[-2] < opens[-2] and   
-closes[-1] > opens[-2] and opens[-1] < closes[-2] and body/rng > 0.6:
-return ‘BULL_ENGULF’
-if closes[-1] < opens[-1] and closes[-2] > opens[-2] and   
-closes[-1] < opens[-2] and opens[-1] > closes[-2] and body/rng > 0.6:
-return ‘BEAR_ENGULF’
-return ‘NONE’
+sh_val = 1 if (prev > sh[-1][1] and price < sh[-1][1]) else 0
+sl_val = 1 if (prev < sl[-1][1] and price > sl[-1][1]) else 0
+return sh_val, sl_val
 
 def in_ob(price, obs):
 for x in obs:
@@ -218,9 +189,8 @@ return False
 
 def get_news():
 try:
-r = requests.get(
-‘https://nfs.faireconomy.media/ff_calendar_thisweek.json’,
-timeout=10)
+url = ‘https://nfs.faireconomy.media/ff_calendar_thisweek.json’
+r = requests.get(url, timeout=10)
 return r.json()
 except:
 return []
@@ -252,29 +222,29 @@ title = e.get(‘title’, ‘’)
 country = e.get(‘country’, ‘’)
 if impact == ‘High’:
 if 0 < diff <= 45:
-uh.append({‘title’: title, ‘country’: country, ‘mins’: int(diff)})
+uh.append(dict(title=title, country=country, mins=int(diff)))
 elif -15 <= diff <= 0:
-jr.append({‘title’: title, ‘country’: country, ‘mins’: int(diff)})
+jr.append(dict(title=title, country=country, mins=int(diff)))
 elif -60 <= diff < -15:
-rh.append({‘title’: title, ‘country’: country, ‘mins’: int(diff)})
+rh.append(dict(title=title, country=country, mins=int(diff)))
 elif impact == ‘Medium’:
 if 0 < diff <= 20:
-um.append({‘title’: title, ‘country’: country, ‘mins’: int(diff)})
+um.append(dict(title=title, country=country, mins=int(diff)))
 except:
 pass
 if uh:
 n = uh[0]
-return {‘status’: ‘WAIT’, ‘reason’: ’News ROUGE dans ’ + str(n[‘mins’]) + ’min : ’ + n[‘title’], ‘action’: ‘Attendre puis trader la reaction’}
+return dict(status=1, reason=’News ROUGE dans ’ + str(n[‘mins’]) + ’min : ’ + n[‘title’], action=‘Attendre puis trader la reaction’)
 if jr:
 n = jr[0]
-return {‘status’: ‘AFTER’, ‘reason’: ’News sortie il y a ’ + str(abs(n[‘mins’])) + ’min : ’ + n[‘title’], ‘action’: ‘Trader la reaction - confirmer M15’}
+return dict(status=2, reason=’News sortie il y a ’ + str(abs(n[‘mins’])) + ’min : ’ + n[‘title’], action=‘Trader la reaction - confirmer M15’)
 if rh:
 n = rh[0]
-return {‘status’: ‘AFTER’, ‘reason’: ’Post-news ’ + str(abs(n[‘mins’])) + ’min : ’ + n[‘title’], ‘action’: ‘Marche en digestion’}
+return dict(status=2, reason=‘Post-news ’ + str(abs(n[‘mins’])) + ‘min : ’ + n[‘title’], action=‘Marche en digestion’)
 if um:
 n = um[0]
-return {‘status’: ‘CAUTION’, ‘reason’: ’News ORANGE dans ’ + str(n[‘mins’]) + ’min : ’ + n[‘title’], ‘action’: ‘Lot reduit 50%’}
-return {‘status’: ‘CLEAR’, ‘reason’: ‘’, ‘action’: ‘’}
+return dict(status=3, reason=‘News ORANGE dans ’ + str(n[‘mins’]) + ‘min : ’ + n[‘title’], action=‘Lot reduit 50%’)
+return dict(status=0, reason=’’, action=’’)
 
 def session():
 h = datetime.now(timezone.utc).hour
@@ -296,7 +266,7 @@ return round(max(0.01, min(lot, 2.0)), 2)
 def daily_ok():
 today = datetime.now().strftime(’%Y-%m-%d’)
 if daily[‘date’] != today:
-daily.update({‘date’: today, ‘count’: 0, ‘losses’: 0})
+daily.update(dict(date=today, count=0, losses=0))
 if daily[‘count’] >= MAX_TRADES:
 return False
 if daily[‘losses’] >= 2:
@@ -310,112 +280,112 @@ H1  = candles(kraken_pair, 60, 200)
 M15 = candles(kraken_pair, 15, 150)
 if not H4 or not H1 or not M15:
 return None
-price = H1[‘close’][-1]
+price = H1[‘c’][-1]
 dec = 3 if ‘JPY’ in pair_name else (1 if ‘XAU’ in pair_name else 5)
-sd1 = ‘NEUTRAL’
+sd1 = 0
 if D1:
-sd1, _, _ = market_structure(D1[‘high’], D1[‘low’], D1[‘close’])
-e200h4 = ema(H4[‘close’], 100)
-sh4, _, _ = market_structure(H4[‘high’], H4[‘low’], H4[‘close’])
-sh1, bh1, _ = market_structure(H1[‘high’], H1[‘low’], H1[‘close’])
-sm15, _, ch15 = market_structure(M15[‘high’], M15[‘low’], M15[‘close’])
-e9  = ema(H1[‘close’], 9)
-e21 = ema(H1[‘close’], 21)
-e50 = ema(H1[‘close’], 50)
-rv  = rsi(H1[‘close’])
-rd  = rsi_divergence(H1[‘close’])
-mv  = macd(H1[‘close’])
-bbu, bbl, _ = bollinger(H1[‘close’])
-atrv = atr(H1[‘high’], H1[‘low’], H1[‘close’])
-stv  = stochastic(H1[‘high’], H1[‘low’], H1[‘close’])
-cv   = candle_pattern(H1[‘open’], H1[‘high’], H1[‘low’], H1[‘close’])
-bob, beb = order_blocks(H1[‘open’], H1[‘high’], H1[‘low’], H1[‘close’])
-bfv, bfb = fair_value_gaps(H1[‘high’], H1[‘low’])
-swh, swl = liquidity_sweep(H1[‘high’], H1[‘low’], H1[‘close’])
-swh15, swl15 = liquidity_sweep(M15[‘high’], M15[‘low’], M15[‘close’])
-cv15 = candle_pattern(M15[‘open’], M15[‘high’], M15[‘low’], M15[‘close’])
+sd1, _, _ = structure(D1[‘h’], D1[‘l’], D1[‘c’])
+e200h4 = ema(H4[‘c’], 100)
+sh4, _, _ = structure(H4[‘h’], H4[‘l’], H4[‘c’])
+sh1, bh1, _ = structure(H1[‘h’], H1[‘l’], H1[‘c’])
+sm15, _, ch15 = structure(M15[‘h’], M15[‘l’], M15[‘c’])
+e9  = ema(H1[‘c’], 9)
+e21 = ema(H1[‘c’], 21)
+e50 = ema(H1[‘c’], 50)
+rv  = rsi(H1[‘c’])
+rd  = rsi_div(H1[‘c’])
+mv  = macd(H1[‘c’])
+bbu, bbl, _ = bollinger(H1[‘c’])
+atrv = atr(H1[‘h’], H1[‘l’], H1[‘c’])
+stv  = stoch(H1[‘h’], H1[‘l’], H1[‘c’])
+bob, beb = ob(H1[‘o’], H1[‘h’], H1[‘l’], H1[‘c’])
+bfv, bfb = fvg(H1[‘h’], H1[‘l’])
+swh, swl = sweep(H1[‘h’], H1[‘l’], H1[‘c’])
+swh15, swl15 = sweep(M15[‘h’], M15[‘l’], M15[‘c’])
+
+```
 bs = 0
 br = []
-if sd1 == ‘BULLISH’:                     bs += 3; br.append(‘D1 haussier’)
-if sh4 == ‘BULLISH’:                     bs += 2; br.append(‘H4 HH+HL’)
-if sh1 == ‘BULLISH’:                     bs += 2; br.append(‘H1 haussier’)
-if price > e200h4:                       bs += 1; br.append(‘Prix > EMA200 H4’)
-if swl:                                  bs += 3; br.append(‘Sweep bas H1’)
-if swl15:                                bs += 2; br.append(‘Sweep bas M15’)
-if in_ob(price, bob):                    bs += 3; br.append(‘Order Block haussier’)
-if near_fvg(price, bfv):                bs += 2; br.append(‘FVG haussier’)
-if bh1 == ‘BOS_BULL’:                    bs += 2; br.append(‘BOS haussier H1’)
-if ch15 == ‘CHOCH_BULL’:                bs += 2; br.append(‘CHoCH bullish M15’)
-if rv < 35:                              bs += 2; br.append(’RSI survendu ’ + str(round(rv, 1)))
-if rd == ‘BULL’:                         bs += 2; br.append(‘Divergence RSI bull’)
-if mv > 0:                               bs += 1; br.append(‘MACD positif’)
-if price < bbl:                          bs += 2; br.append(‘Prix sous BB basse’)
-if stv < 20:                             bs += 2; br.append(’Stoch survendu ’ + str(round(stv, 1)))
-if price > e50:                          bs += 1; br.append(‘Prix > EMA50’)
-if e9 > e21:                             bs += 1; br.append(‘EMA9 > EMA21’)
-if cv in [‘BULL_PIN’, ‘BULL_ENGULF’]:    bs += 2; br.append(’Bougie : ’ + cv)
-if cv15 in [‘BULL_PIN’, ‘BULL_ENGULF’]:  bs += 1; br.append(’Bougie M15 : ’ + cv15)
-if nc[‘status’] == ‘AFTER’:              bs += 1; br.append(‘Post-news opportunite’)
+if sd1 == 1:    bs += 3; br.append('D1 haussier')
+if sh4 == 1:    bs += 2; br.append('H4 HH+HL')
+if sh1 == 1:    bs += 2; br.append('H1 haussier')
+if price > e200h4: bs += 1; br.append('Prix > EMA200 H4')
+if swl:         bs += 3; br.append('Sweep bas H1')
+if swl15:       bs += 2; br.append('Sweep bas M15')
+if in_ob(price, bob): bs += 3; br.append('Order Block haussier')
+if near_fvg(price, bfv): bs += 2; br.append('FVG haussier')
+if bh1 == 1:    bs += 2; br.append('BOS haussier H1')
+if ch15 == 1:   bs += 2; br.append('CHoCH bullish M15')
+if rv < 35:     bs += 2; br.append('RSI survendu ' + str(round(rv, 1)))
+if rd == 1:     bs += 2; br.append('Divergence RSI bull')
+if mv > 0:      bs += 1; br.append('MACD positif')
+if price < bbl: bs += 2; br.append('Prix sous BB basse')
+if stv < 20:    bs += 2; br.append('Stoch survendu ' + str(round(stv, 1)))
+if price > e50: bs += 1; br.append('Prix > EMA50')
+if e9 > e21:    bs += 1; br.append('EMA9 > EMA21')
+if nc['status'] == 2: bs += 1; br.append('Post-news opportunite')
+
 ss = 0
 sr = []
-if sd1 == ‘BEARISH’:                     ss += 3; sr.append(‘D1 baissier’)
-if sh4 == ‘BEARISH’:                     ss += 2; sr.append(‘H4 LH+LL’)
-if sh1 == ‘BEARISH’:                     ss += 2; sr.append(‘H1 baissier’)
-if price < e200h4:                       ss += 1; sr.append(‘Prix < EMA200 H4’)
-if swh:                                  ss += 3; sr.append(‘Sweep haut H1’)
-if swh15:                                ss += 2; sr.append(‘Sweep haut M15’)
-if in_ob(price, beb):                    ss += 3; sr.append(‘Order Block baissier’)
-if near_fvg(price, bfb):                ss += 2; sr.append(‘FVG baissier’)
-if bh1 == ‘BOS_BEAR’:                    ss += 2; sr.append(‘BOS baissier H1’)
-if ch15 == ‘CHOCH_BEAR’:                ss += 2; sr.append(‘CHoCH bearish M15’)
-if rv > 65:                              ss += 2; sr.append(’RSI surachete ’ + str(round(rv, 1)))
-if rd == ‘BEAR’:                         ss += 2; sr.append(‘Divergence RSI bear’)
-if mv < 0:                               ss += 1; sr.append(‘MACD negatif’)
-if price > bbu:                          ss += 2; sr.append(‘Prix > BB haute’)
-if stv > 80:                             ss += 2; sr.append(’Stoch surachete ’ + str(round(stv, 1)))
-if price < e50:                          ss += 1; sr.append(‘Prix < EMA50’)
-if e9 < e21:                             ss += 1; sr.append(‘EMA9 < EMA21’)
-if cv in [‘BEAR_PIN’, ‘BEAR_ENGULF’]:    ss += 2; sr.append(’Bougie : ’ + cv)
-if cv15 in [‘BEAR_PIN’, ‘BEAR_ENGULF’]:  ss += 1; sr.append(’Bougie M15 : ’ + cv15)
-if nc[‘status’] == ‘AFTER’:              ss += 1; sr.append(‘Post-news opportunite’)
+if sd1 == -1:   ss += 3; sr.append('D1 baissier')
+if sh4 == -1:   ss += 2; sr.append('H4 LH+LL')
+if sh1 == -1:   ss += 2; sr.append('H1 baissier')
+if price < e200h4: ss += 1; sr.append('Prix < EMA200 H4')
+if swh:         ss += 3; sr.append('Sweep haut H1')
+if swh15:       ss += 2; sr.append('Sweep haut M15')
+if in_ob(price, beb): ss += 3; sr.append('Order Block baissier')
+if near_fvg(price, bfb): ss += 2; sr.append('FVG baissier')
+if bh1 == -1:   ss += 2; sr.append('BOS baissier H1')
+if ch15 == -1:  ss += 2; sr.append('CHoCH bearish M15')
+if rv > 65:     ss += 2; sr.append('RSI surachete ' + str(round(rv, 1)))
+if rd == -1:    ss += 2; sr.append('Divergence RSI bear')
+if mv < 0:      ss += 1; sr.append('MACD negatif')
+if price > bbu: ss += 2; sr.append('Prix > BB haute')
+if stv > 80:    ss += 2; sr.append('Stoch surachete ' + str(round(stv, 1)))
+if price < e50: ss += 1; sr.append('Prix < EMA50')
+if e9 < e21:    ss += 1; sr.append('EMA9 < EMA21')
+if nc['status'] == 2: ss += 1; sr.append('Post-news opportunite')
+
 THRESH = 10
 MAX = 30
 if bs >= THRESH and bs > ss:
-sig = ‘ACHAT’
-sc = bs
-reasons = br
+    sig = 1; sc = bs; reasons = br
 elif ss >= THRESH and ss > bs:
-sig = ‘VENTE’
-sc = ss
-reasons = sr
+    sig = -1; sc = ss; reasons = sr
 else:
-return None
+    return None
+
 conf = min(95, int(sc / MAX * 100))
-sh_pts, sl_pts = swings(H1[‘high’], H1[‘low’])
-if sig == ‘ACHAT’:
-sl_s = sl_pts[-1][1] - atrv * 0.3 if sl_pts else price - atrv * 1.5
-sl = min(sl_s, price - atrv * 1.5)
-tp1 = price + (price - sl) * 1.5
-tp2 = price + (price - sl) * 2.5
-tp3 = price + (price - sl) * 4.0
+sh_pts, sl_pts = swings(H1['h'], H1['l'])
+if sig == 1:
+    sl_s = sl_pts[-1][1] - atrv * 0.3 if sl_pts else price - atrv * 1.5
+    sl = min(sl_s, price - atrv * 1.5)
+    tp1 = price + (price - sl) * 1.5
+    tp2 = price + (price - sl) * 2.5
+    tp3 = price + (price - sl) * 4.0
 else:
-sl_s = sh_pts[-1][1] + atrv * 0.3 if sh_pts else price + atrv * 1.5
-sl = max(sl_s, price + atrv * 1.5)
-tp1 = price - (sl - price) * 1.5
-tp2 = price - (sl - price) * 2.5
-tp3 = price - (sl - price) * 4.0
-pip_size = 0.01 if ‘JPY’ in pair_name else (0.1 if ‘XAU’ in pair_name else 0.0001)
+    sl_s = sh_pts[-1][1] + atrv * 0.3 if sh_pts else price + atrv * 1.5
+    sl = max(sl_s, price + atrv * 1.5)
+    tp1 = price - (sl - price) * 1.5
+    tp2 = price - (sl - price) * 2.5
+    tp3 = price - (sl - price) * 4.0
+
+pip_size = 0.01 if 'JPY' in pair_name else (0.1 if 'XAU' in pair_name else 0.0001)
 sl_pips = abs(price - sl) / pip_size
-pv = next((p[‘pip_val’] for p in PAIRS if p[‘name’] == pair_name), 10)
-lm = 0.5 if nc[‘status’] == ‘CAUTION’ else 1.0
+pv = next((p['pip_val'] for p in PAIRS if p['name'] == pair_name), 10)
+lm = 0.5 if nc['status'] == 3 else 1.0
 lv = lot_size(sl_pips, pv, lm * sess_mult)
-return {
-‘sig’: sig, ‘sc’: sc, ‘MAX’: MAX, ‘conf’: conf,
-‘price’: price, ‘sl’: sl, ‘tp1’: tp1, ‘tp2’: tp2, ‘tp3’: tp3,
-‘sl_pips’: sl_pips, ‘lot’: lv, ‘rsi’: rv, ‘stoch’: stv,
-‘sd1’: sd1, ‘sh4’: sh4, ‘sh1’: sh1, ‘sm15’: sm15,
-‘cv’: cv, ‘reasons’: reasons[:8], ‘dec’: dec, ‘nc’: nc,
-}
+
+sd1_txt = 'BULLISH' if sd1 == 1 else ('BEARISH' if sd1 == -1 else 'NEUTRAL')
+sh4_txt = 'BULLISH' if sh4 == 1 else ('BEARISH' if sh4 == -1 else 'NEUTRAL')
+sh1_txt = 'BULLISH' if sh1 == 1 else ('BEARISH' if sh1 == -1 else 'NEUTRAL')
+sm15_txt = 'BULLISH' if sm15 == 1 else ('BEARISH' if sm15 == -1 else 'NEUTRAL')
+
+return dict(sig=sig, sc=sc, MAX=MAX, conf=conf, price=price, sl=sl,
+            tp1=tp1, tp2=tp2, tp3=tp3, sl_pips=sl_pips, lot=lv,
+            rsi=rv, stoch=stv, sd1=sd1_txt, sh4=sh4_txt, sh1=sh1_txt,
+            sm15=sm15_txt, reasons=reasons[:8], dec=dec, nc=nc)
+```
 
 def check(pair, events):
 name = pair[‘name’]
@@ -425,7 +395,7 @@ return
 if not daily_ok():
 return
 nc = classify_news(name, events)
-if nc[‘status’] == ‘WAIT’:
+if nc[‘status’] == 1:
 key = name + nc[‘reason’]
 if last_news_alert.get(name) != key:
 last_news_alert[name] = key
@@ -436,19 +406,21 @@ res = analyze(name, pair[‘kraken’], nc, smult)
 if not res:
 return
 sig = res[‘sig’]
+sig_txt = ‘ACHAT’ if sig == 1 else ‘VENTE’
 cur = open_positions.get(name)
 if cur and cur != sig:
-send(’RETOURNEMENT ’ + name + ’\nFerme ta position ’ + cur + ’\nNouveau signal : ’ + sig)
-key = name + ‘_’ + sig
+cur_txt = ‘ACHAT’ if cur == 1 else ‘VENTE’
+send(’RETOURNEMENT ’ + name + ’\nFerme ta position ’ + cur_txt + ’\nNouveau signal : ’ + sig_txt)
+key = name + str(sig)
 if last_signals.get(key):
 return
 last_signals[key] = True
 open_positions[name] = sig
 daily[‘count’] += 1
 dec = res[‘dec’]
-icon = ‘BUY’ if sig == ‘ACHAT’ else ‘SELL’
+icon = ‘BUY’ if sig == 1 else ‘SELL’
 nc_info = res[‘nc’]
-msg = icon + ’ SIGNAL ’ + sig + ’ - ’ + name + ‘\n’
+msg = icon + ’ SIGNAL ’ + sig_txt + ’ - ’ + name + ‘\n’
 msg += ‘========================\n’
 msg += ‘Prix  : ’ + str(round(res[‘price’], dec)) + ‘\n’
 msg += ‘SL    : ’ + str(round(res[‘sl’], dec)) + ’ (’ + str(round(res[‘sl_pips’])) + ’ pips)\n’
@@ -461,12 +433,10 @@ msg += ’Confiance : ’ + str(res[‘conf’]) + ‘% (’ + str(res[‘sc’]
 msg += ’Session   : ’ + sess + ‘\n’
 msg += ’D1  : ’ + res[‘sd1’] + ‘\n’
 msg += ’H4  : ’ + res[‘sh4’] + ‘\n’
-msg += ’H1  : ’ + res[‘sh1’] + ‘\n’
+msg += ‘H1  : ’ + res[‘sh1’] + ‘\n’
 msg += ‘M15 : ’ + res[‘sm15’] + ‘\n’
 msg += ‘RSI : ’ + str(round(res[‘rsi’], 1)) + ’ | Stoch : ’ + str(round(res[‘stoch’], 1)) + ‘\n’
-if res[‘cv’] != ‘NONE’:
-msg += ‘Bougie : ’ + res[‘cv’] + ‘\n’
-if nc_info[‘status’] != ‘CLEAR’:
+if nc_info[‘status’] != 0:
 msg += ‘========================\n’
 msg += ‘NEWS : ’ + nc_info[‘reason’] + ‘\n’
 msg += nc_info[‘action’] + ‘\n’
@@ -477,7 +447,7 @@ msg += ’  - ’ + r + ‘\n’
 msg += ‘========================\n’
 msg += ‘Risque 1% - Signal indicatif’
 send(msg)
-print(’[’ + datetime.now().strftime(’%H:%M’) + ’] ’ + name + ’ ’ + sig + ’ ’ + str(res[‘conf’]) + ‘%’)
+print(’[’ + datetime.now().strftime(’%H:%M’) + ’] ’ + name + ’ ’ + sig_txt + ’ ’ + str(res[‘conf’]) + ‘%’)
 
 def reset_check():
 global last_reset
