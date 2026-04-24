@@ -3,7 +3,7 @@ import time
 import os
 from datetime import datetime, timezone
 
-TOKEN = os.environ.get(‘TOKEN’, ‘’)
+TOKEN = os.environ.get('TOKEN', '')
 IDS = [‘525011337’, ‘7276558677’]
 
 PAIRS = [
