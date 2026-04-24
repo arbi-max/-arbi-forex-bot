@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-“””
-╔══════════════════════════════════════════════════════════════╗
-║          ARBI FOREX BOT PRO v6 — INSTITUTIONNEL              ║
-║   Smart Money Concepts + News Trading + Multi-Timeframe      ║
-║   Logique : D1 → H4 → H1 → M15                              ║
-╚══════════════════════════════════════════════════════════════╝
-“””
+
+# coding: utf-8
+
+# ARBI FOREX BOT PRO v6 - INSTITUTIONNEL
+
+# Smart Money Concepts + News Trading + Multi-Timeframe
+
+# Logique : D1 > H4 > H1 > M15
 
 import requests
 import time
 from datetime import datetime, timezone, timedelta
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 # CONFIGURATION
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 TOKEN   = “8636672541:AAElNEq4IKwrRzTLuqoaqttadmkGKAVEVlM”
 IDS     = [“525011337”, “7276558677”]
@@ -39,11 +40,11 @@ open_pos     = {}
 daily        = {“date”: “”, “count”: 0, “losses”: 0}
 last_news_alert = {}
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 # TELEGRAM
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 def send(msg):
 for cid in IDS:
@@ -57,11 +58,11 @@ except Exception as e:
 print(f”[TELEGRAM ERROR] {e}”)
 time.sleep(0.3)
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
-# DONNÉES MARCHÉ — KRAKEN
+# DONNEES MARCHE - KRAKEN
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 def ohlc(pair, interval=60, count=200):
 try:
@@ -84,11 +85,11 @@ except Exception as e:
 print(f”[OHLC ERROR] {pair} {interval}m : {e}”)
 return None
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 # INDICATEURS TECHNIQUES
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 def ema(c, n):
 if len(c) < n:
@@ -172,11 +173,11 @@ return False
 avg = sum(v[-n-1:-1]) / n
 return v[-1] > avg * 1.5
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 # SMART MONEY CONCEPTS
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 def swing_points(h, l, lb=5):
 sh, sl = [], []
@@ -297,11 +298,11 @@ best_dist = dist
 best = ob
 return best
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
-# CALENDRIER ÉCONOMIQUE — LOGIQUE PRO
+# CALENDRIER ECONOMIQUE - LOGIQUE PRO
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 def get_news():
 try:
@@ -318,12 +319,12 @@ def classify_news_for_pair(pair_name, events):
 Analyse les news et retourne :
 - status : “CLEAR”, “WAIT”, “TRADE_AFTER”, “AVOID”
 - context : description de la situation
-- bias : “BULL”, “BEAR”, “NONE” basé sur consensus attendu
+- bias : “BULL”, “BEAR”, “NONE” base sur consensus attendu
 “””
 now = datetime.now(timezone.utc)
 
 ```
-# Devises concernées par la paire
+# Devises concernees par la paire
 curs = []
 if "EUR" in pair_name: curs.append("EUR")
 if "GBP" in pair_name: curs.append("GBP")
@@ -331,10 +332,10 @@ if "JPY" in pair_name: curs.append("JPY")
 if "XAU" in pair_name: curs += ["USD", "XAU"]
 curs.append("USD")
 
-upcoming_high   = []  # News rouge à venir (< 45 min)
-upcoming_medium = []  # News orange à venir (< 30 min)
+upcoming_high   = []  # News rouge a venir (< 45 min)
+upcoming_medium = []  # News orange a venir (< 30 min)
 just_released   = []  # News venant de sortir (< 15 min)
-recent_high     = []  # News rouge récente (15-60 min)
+recent_high     = []  # News rouge recente (15-60 min)
 
 for e in events:
     impact = e.get("impact", "")
@@ -363,23 +364,23 @@ for e in events:
     except:
         pass
 
-# LOGIQUE DE DÉCISION :
+# LOGIQUE DE DECISION :
 
-# 1. News rouge imminente (<45 min) → attendre
+# 1. News rouge imminente (<45 min) -> attendre
 if upcoming_high:
     n = upcoming_high[0]
     return {
         "status":  "WAIT",
         "reason":  f"News ROUGE dans {n['mins']}min : {n.get('title','?')} ({n.get('country','?')})",
-        "action":  "Attendre la sortie puis trader la réaction",
+        "action":  "Attendre la sortie puis trader la reaction",
         "bias":    "NONE",
         "events":  upcoming_high
     }
 
-# 2. News rouge vient de sortir (<15 min) → opportunité de trade la réaction
+# 2. News rouge vient de sortir (<15 min) -> opportunite de trade la reaction
 if just_released:
     n = just_released[0]
-    # Essayer de déterminer le biais basé sur le titre
+    # Essayer de determiner le biais base sur le titre
     title = n.get("title", "").upper()
     bias  = "NONE"
     # NFP, CPI, GDP positif = bullish USD
@@ -399,29 +400,29 @@ if just_released:
     return {
         "status":  "TRADE_AFTER",
         "reason":  f"News ROUGE sortie il y a {abs(int(n['mins']))}min : {n.get('title','?')}",
-        "action":  "Trader la réaction — confirmer direction sur M15",
+        "action":  "Trader la reaction - confirmer direction sur M15",
         "bias":    bias,
         "events":  just_released
     }
 
-# 3. News rouge récente (15-60 min) → marché en digestion, trade possible avec confirmation
+# 3. News rouge recente (15-60 min) -> marche en digestion, trade possible avec confirmation
 if recent_high:
     n = recent_high[0]
     return {
         "status":  "TRADE_AFTER",
         "reason":  f"Post-news ROUGE ({abs(int(n['mins']))}min) : {n.get('title','?')}",
-        "action":  "Marché en digestion — confirmer tendance",
+        "action":  "Marche en digestion - confirmer tendance",
         "bias":    "NONE",
         "events":  recent_high
     }
 
-# 4. News orange imminente (<20 min) → prudence mais pas blocage total
+# 4. News orange imminente (<20 min) -> prudence mais pas blocage total
 if upcoming_medium:
     n = upcoming_medium[0]
     return {
         "status":  "CAUTION",
         "reason":  f"News ORANGE dans {n['mins']}min : {n.get('title','?')}",
-        "action":  "Trade possible mais réduire lot de 50%",
+        "action":  "Trade possible mais reduire lot de 50%",
         "bias":    "NONE",
         "events":  upcoming_medium
     }
@@ -436,11 +437,11 @@ return {
 }
 ```
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 # SESSION DE TRADING
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 def session():
 h = datetime.now(timezone.utc).hour
@@ -450,11 +451,11 @@ if 16 <= h < 21: return “🇺🇸 New York”,       True,  1.0
 if 2  <= h <  5: return “🇯🇵 Tokyo”,           True,  0.7   # OK pour JPY
 return “😴 Hors session”, False, 0
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 # GESTION DU RISQUE
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 def lot_size(sl_pips, pip_val=10, reduce=1.0):
 risk = CAPITAL * RISK_PCT / 100 * reduce
@@ -468,17 +469,17 @@ daily.update({“date”: today, “count”: 0, “losses”: 0})
 if daily[“count”] >= MAX_TRADES:
 return False, f”Max {MAX_TRADES} trades/jour atteint”
 if daily[“losses”] >= 2:
-return False, “2 pertes consécutives — pause trading”
+return False, “2 pertes consecutives - pause trading”
 return True, “OK”
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 # ANALYSE PRINCIPALE
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 def analyze(pair_name, kraken_pair, news_ctx, session_mult):
-# Récupérer les données multi-timeframe
+# Recuperer les donnees multi-timeframe
 D1  = ohlc(kraken_pair, 1440, 60)
 H4  = ohlc(kraken_pair, 240,  100)
 H1  = ohlc(kraken_pair, 60,   200)
@@ -526,7 +527,7 @@ in_bear_ob   = price_in_ob(price, bear_ob)
 near_bull_fvg = price_near_fvg(price, bull_fvg)
 near_bear_fvg = price_near_fvg(price, bear_fvg)
 
-# ── SMC M15 (confirmation entrée) ──
+# ── SMC M15 (confirmation entree) ──
 struct_m15, bos_m15, choch_m15 = market_structure(M15["h"], M15["l"], M15["c"])
 candle_m15 = candle_pattern(M15["o"], M15["h"], M15["l"], M15["c"])
 swept_high_m15, swept_low_m15 = liquidity_sweep(M15["h"], M15["l"], M15["c"])
@@ -534,22 +535,22 @@ swept_high_m15, swept_low_m15 = liquidity_sweep(M15["h"], M15["l"], M15["c"])
 # ── BIAIS NEWS ──
 news_bias = news_ctx.get("bias", "NONE")
 
-# ══════════════════════════════════
+# ----------------------------------
 # SCORING ACHAT (MAX = 30)
-# ══════════════════════════════════
+# ----------------------------------
 bull_score   = 0
 bull_reasons = []
 
 # Tendance macro (poids fort)
 if struct_d1 == "BULLISH":
     bull_score += 3
-    bull_reasons.append("D1 tendance haussière 📈")
+    bull_reasons.append("D1 tendance haussiere 📈")
 if struct_h4 == "BULLISH":
     bull_score += 2
     bull_reasons.append("H4 structure HH+HL")
 if struct_h1 == "BULLISH":
     bull_score += 2
-    bull_reasons.append("H1 structure haussière")
+    bull_reasons.append("H1 structure haussiere")
 if price > e200_h4:
     bull_score += 1
     bull_reasons.append("Prix > EMA200 H4")
@@ -557,10 +558,10 @@ if price > e200_h4:
 # Smart Money
 if swept_low:
     bull_score += 3
-    bull_reasons.append("⚡ Sweep liquidité bas H1 → retournement")
+    bull_reasons.append("⚡ Sweep liquidite bas H1 -> retournement")
 if swept_low_m15:
     bull_score += 2
-    bull_reasons.append("⚡ Sweep liquidité bas M15")
+    bull_reasons.append("⚡ Sweep liquidite bas M15")
 if in_bull_ob:
     bull_score += 3
     bull_reasons.append("🟩 Prix dans Order Block haussier")
@@ -580,7 +581,7 @@ if r < 35:
     bull_reasons.append(f"RSI survendu {r:.0f}")
 if rdiv == "BULL_DIV":
     bull_score += 2
-    bull_reasons.append("Divergence RSI haussière")
+    bull_reasons.append("Divergence RSI haussiere")
 if macd_cross_bull:
     bull_score += 2
     bull_reasons.append("MACD croisement haussier")
@@ -589,7 +590,7 @@ elif m > 0:
     bull_reasons.append("MACD positif")
 if price < bb_l:
     bull_score += 2
-    bull_reasons.append("Prix sous BB basse → rebond")
+    bull_reasons.append("Prix sous BB basse -> rebond")
 if sto < 20:
     bull_score += 2
     bull_reasons.append(f"Stochastique survendu {sto:.0f}")
@@ -604,40 +605,40 @@ if candle_m15 in ["BULL_PIN", "BULL_ENGULF"]:
     bull_reasons.append(f"Pattern M15 : {candle_m15}")
 if vol_sp:
     bull_score += 1
-    bull_reasons.append("Spike volume confirmé")
+    bull_reasons.append("Spike volume confirme")
 
 # Biais news
 if news_bias == "USD_WEAK" and "USD" in pair_name:
     bull_score += 2
-    bull_reasons.append("📰 News : USD faible → favorable ACHAT")
+    bull_reasons.append("📰 News : USD faible -> favorable ACHAT")
 if news_bias == "USD_STRONG" and pair_name in ["EUR/USD", "GBP/USD", "XAU/USD"]:
     bull_score -= 2  # Contre le biais
 
-# ══════════════════════════════════
+# ----------------------------------
 # SCORING VENTE (MAX = 30)
-# ══════════════════════════════════
+# ----------------------------------
 bear_score   = 0
 bear_reasons = []
 
 if struct_d1 == "BEARISH":
     bear_score += 3
-    bear_reasons.append("D1 tendance baissière 📉")
+    bear_reasons.append("D1 tendance baissiere 📉")
 if struct_h4 == "BEARISH":
     bear_score += 2
     bear_reasons.append("H4 structure LH+LL")
 if struct_h1 == "BEARISH":
     bear_score += 2
-    bear_reasons.append("H1 structure baissière")
+    bear_reasons.append("H1 structure baissiere")
 if price < e200_h4:
     bear_score += 1
     bear_reasons.append("Prix < EMA200 H4")
 
 if swept_high:
     bear_score += 3
-    bear_reasons.append("⚡ Sweep liquidité haut H1 → retournement")
+    bear_reasons.append("⚡ Sweep liquidite haut H1 -> retournement")
 if swept_high_m15:
     bear_score += 2
-    bear_reasons.append("⚡ Sweep liquidité haut M15")
+    bear_reasons.append("⚡ Sweep liquidite haut M15")
 if in_bear_ob:
     bear_score += 3
     bear_reasons.append("🟥 Prix dans Order Block baissier")
@@ -653,22 +654,22 @@ if choch_m15 == "CHOCH_BEAR":
 
 if r > 65:
     bear_score += 2
-    bear_reasons.append(f"RSI surachet é {r:.0f}")
+    bear_reasons.append(f"RSI surachet e {r:.0f}")
 if rdiv == "BEAR_DIV":
     bear_score += 2
-    bear_reasons.append("Divergence RSI baissière")
+    bear_reasons.append("Divergence RSI baissiere")
 if macd_cross_bear:
     bear_score += 2
     bear_reasons.append("MACD croisement baissier")
 elif m < 0:
     bear_score += 1
-    bear_reasons.append("MACD négatif")
+    bear_reasons.append("MACD negatif")
 if price > bb_u:
     bear_score += 2
-    bear_reasons.append("Prix au-dessus BB haute → rejet")
+    bear_reasons.append("Prix au-dessus BB haute -> rejet")
 if sto > 80:
     bear_score += 2
-    bear_reasons.append(f"Stochastique suracheté {sto:.0f}")
+    bear_reasons.append(f"Stochastique surachete {sto:.0f}")
 if price < e50:
     bear_score += 1
     bear_reasons.append("Prix < EMA50")
@@ -680,21 +681,21 @@ if candle_m15 in ["BEAR_PIN", "BEAR_ENGULF"]:
     bear_reasons.append(f"Pattern M15 : {candle_m15}")
 if vol_sp:
     bear_score += 1
-    bear_reasons.append("Spike volume confirmé")
+    bear_reasons.append("Spike volume confirme")
 
 if news_bias == "USD_STRONG" and pair_name in ["EUR/USD", "GBP/USD", "XAU/USD"]:
     bear_score += 2
-    bear_reasons.append("📰 News : USD fort → favorable VENTE")
+    bear_reasons.append("📰 News : USD fort -> favorable VENTE")
 if news_bias == "USD_WEAK" and "USD" in pair_name:
     bear_score -= 2
 
-# ══════════════════════════════════
-# SIGNAL FINAL — Seuil 10/30
-# ══════════════════════════════════
+# ----------------------------------
+# SIGNAL FINAL - Seuil 10/30
+# ----------------------------------
 MAX_SCORE = 30
-THRESHOLD = 10  # Seuil assoupli mais garde la qualité
+THRESHOLD = 10  # Seuil assoupli mais garde la qualite
 
-# Si on est en mode TRADE_AFTER (post-news) → baisser le seuil légèrement
+# Si on est en mode TRADE_AFTER (post-news) -> baisser le seuil legerement
 if news_ctx["status"] == "TRADE_AFTER":
     THRESHOLD = 9
 
@@ -732,7 +733,7 @@ pip_size = 0.01 if "JPY" in pair_name else (0.1 if "XAU" in pair_name else 0.000
 sl_pips  = abs(price - sl) / pip_size
 pip_val  = next((p["pip_val"] for p in PAIRS if p["name"] == pair_name), 10)
 
-# Réduire lot si news orange ou session faible
+# Reduire lot si news orange ou session faible
 lot_mult = 0.5 if news_ctx["status"] == "CAUTION" else 1.0
 lot_mult *= session_mult
 lot      = lot_size(sl_pips, pip_val, lot_mult)
@@ -765,11 +766,11 @@ return {
 }
 ```
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 # FORMATAGE DU MESSAGE TELEGRAM
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 def format_signal(result, pair_name, sess_name):
 sig  = result[“signal”]
@@ -781,7 +782,7 @@ news = result[“news_ctx”]
 icon  = "🟢 BUY" if sig == "ACHAT" else "🔴 SELL"
 stars = "⭐" * (1 + conf // 25)
 
-msg  = f"{icon} — {pair_name} {stars}\n"
+msg  = f"{icon} - {pair_name} {stars}\n"
 msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
 msg += f"💰 Prix    : {result['price']:.{dec}f}\n"
 msg += f"🛑 SL      : {result['sl']:.{dec}f} ({result['sl_pips']:.0f} pips)\n"
@@ -800,13 +801,13 @@ msg += f"📉 RSI : {result['rsi']:.0f} | Stoch : {result['stoch']:.0f}\n"
 if result["candle"] != "NONE":
     msg += f"🕯️ Bougie : {result['candle']}\n"
 if result["vol_spike"]:
-    msg += "📢 Volume spike détecté\n"
+    msg += "📢 Volume spike detecte\n"
 
 # Contexte news
 if news["status"] != "CLEAR":
     msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
     msg += f"📰 NEWS : {news['reason']}\n"
-    msg += f"→ {news['action']}\n"
+    msg += f"-> {news['action']}\n"
 
 msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
 msg += "💡 Confluences SMC :\n"
@@ -814,16 +815,16 @@ for r in result["reasons"]:
     msg += f"  • {r}\n"
 msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
 msg += f"⚠️ Risque : 1% | Signal indicatif\n"
-msg += "Gère ton MM — trade prudemment 🧠"
+msg += "Gere ton MM - trade prudemment 🧠"
 
 return msg
 ```
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
-# VÉRIFICATION PAR PAIRE
+# VERIFICATION PAR PAIRE
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 def check(pair, news_events):
 name = pair[“name”]
@@ -842,23 +843,23 @@ if not ok:
 # 3. Analyser les news pour cette paire (logique pro)
 news_ctx = classify_news_for_pair(name, news_events)
 
-# Si WAIT → bloquer ET alerter une seule fois
+# Si WAIT -> bloquer ET alerter une seule fois
 if news_ctx["status"] == "WAIT":
     alert_key = name + news_ctx["reason"]
     if last_news_alert.get(name) != alert_key:
         last_news_alert[name] = alert_key
-        msg  = f"⏸️ PAUSE — {name}\n"
+        msg  = f"⏸️ PAUSE - {name}\n"
         msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
         msg += f"📰 {news_ctx['reason']}\n"
-        msg += f"→ {news_ctx['action']}\n"
+        msg += f"-> {news_ctx['action']}\n"
         msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
-        msg += "Je surveille et t'envoie le signal après la news 👀"
+        msg += "Je surveille et t'envoie le signal apres la news 👀"
         send(msg)
     return
 else:
     last_news_alert[name] = None  # Reset
 
-# 4. Analyse technique complète
+# 4. Analyse technique complete
 result = analyze(name, pair["kraken"], news_ctx, sess_mult)
 if not result:
     return
@@ -870,7 +871,7 @@ current = open_pos.get(name)
 if current and current != sig:
     send(f"🔄 RETOURNEMENT {name}\n❌ Ferme ta position {current}\n✅ Nouveau signal : {sig}")
 
-# 6. Éviter doublons (même signal dans les 4h)
+# 6. Eviter doublons (meme signal dans les 4h)
 sig_key = f"{name}_{sig}"
 if last_signals.get(sig_key):
     return
@@ -879,17 +880,17 @@ last_signals[sig_key] = True
 open_pos[name]         = sig
 daily["count"]        += 1
 
-# Envoyer le signal formaté
+# Envoyer le signal formate
 msg = format_signal(result, name, sess_name)
 send(msg)
 print(f"[{datetime.now().strftime('%H:%M')}] ✅ Signal {name} {sig} conf={result['confidence']}%")
 ```
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 # RESET SIGNAUX (toutes les 4h)
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 last_reset = datetime.now()
 
@@ -898,32 +899,32 @@ global last_reset
 if (datetime.now() - last_reset).seconds > 14400:  # 4h
 last_signals.clear()
 last_reset = datetime.now()
-print(”[RESET] Signaux réinitialisés”)
+print(”[RESET] Signaux reinitialises”)
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
-# DÉMARRAGE
+# DEMARRAGE
 
-# ═══════════════════════════════════════════════════════════════
+# —————————————————————
 
 now_str = datetime.now().strftime(”%d/%m/%Y %H:%M”)
 send(
-f”🚀 ARBI BOT PRO v6 — {now_str}\n”
+f”🚀 ARBI BOT PRO v6 - {now_str}\n”
 f”━━━━━━━━━━━━━━━━━━━━━━\n”
 f”🏦 Niveau : Institutionnel SMC\n”
 f”💱 Paires : EUR/USD | GBP/USD | USD/JPY | XAU/USD\n”
-f”📊 Analyse : D1 → H4 → H1 → M15\n”
-f”📰 News : Logique Pro (trade la réaction)\n”
+f”📊 Analyse : D1 -> H4 -> H1 -> M15\n”
+f”📰 News : Logique Pro (trade la reaction)\n”
 f”🎯 Seuil signal : 10/30 confluences\n”
 f”💰 Capital : {CAPITAL}$ | Risque : {RISK_PCT}%\n”
 f”━━━━━━━━━━━━━━━━━━━━━━\n”
 f”En surveillance… Les signaux arrivent 👀”
 )
-print(“✅ ArbiBot Pro v6 démarré”)
+print(“✅ ArbiBot Pro v6 demarre”)
 
 while True:
 try:
-# Récupérer les news une fois par cycle (pas par paire)
+# Recuperer les news une fois par cycle (pas par paire)
 news_events = get_news()
 
 ```
@@ -935,11 +936,11 @@ news_events = get_news()
         time.sleep(2)
 
     maybe_reset_signals()
-    print(f"[{datetime.now().strftime('%H:%M')}] Cycle terminé — prochaine analyse dans 5min")
+    print(f"[{datetime.now().strftime('%H:%M')}] Cycle termine - prochaine analyse dans 5min")
     time.sleep(SCAN_INTERVAL)
 
 except KeyboardInterrupt:
-    print("Bot arrêté manuellement")
+    print("Bot arrete manuellement")
     break
 except Exception as e:
     print(f"[ERREUR GLOBALE] {e}")
