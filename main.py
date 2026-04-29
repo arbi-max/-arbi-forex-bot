@@ -1,28 +1,57 @@
 import requests
 import time
 import os
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timezone, timedelta
 
 TOKEN = os.environ.get("TOKEN", "")
 IDS = ["525011337", "7276558677"]
 
 PAIRS = [
-    dict(name="EUR/USD", kraken="EURUSD", pip=0.0001, pip_val=10),
-    dict(name="GBP/USD", kraken="GBPUSD", pip=0.0001, pip_val=10),
-    dict(name="USD/JPY", kraken="USDJPY", pip=0.01,   pip_val=9),
-    dict(name="XAU/USD", kraken="XAUUSD", pip=0.1,    pip_val=1),
+    dict(name="EUR/USD", kraken="EURUSD", pip=0.0001, pip_val=10, usd_side="quote"),
+    dict(name="GBP/USD", kraken="GBPUSD", pip=0.0001, pip_val=10, usd_side="quote"),
+    dict(name="USD/JPY", kraken="USDJPY", pip=0.01,   pip_val=9,  usd_side="base"),
+    dict(name="XAU/USD", kraken="PAXGUSD", pip=0.1,   pip_val=1,  usd_side="quote"),
 ]
+
+CORRELATED = [("EUR/USD", "GBP/USD")]
 
 CAPITAL    = 10000
 RISK_PCT   = 1.0
 MAX_TRADES = 3
 SCAN_INTERVAL = 300
+STATS_FILE = "stats.json"
 
 last_signals    = {}
 open_positions  = {}
 daily           = dict(date="", count=0, losses=0)
 last_news_alert = {}
 last_reset      = datetime.now()
+last_daily_recap = ""
+last_weekly_recap = ""
+
+def load_stats():
+    try:
+        with open(STATS_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return dict(trades=[])
+
+def save_stats(s):
+    try:
+        with open(STATS_FILE, "w") as f:
+            json.dump(s, f)
+    except Exception as e:
+        print("Stats save error: " + str(e))
+
+def add_trade(pair, side, entry, exit_price, result_pips, status):
+    s = load_stats()
+    s["trades"].append(dict(
+        date=datetime.now().strftime("%Y-%m-%d"),
+        time=datetime.now().strftime("%H:%M"),
+        pair=pair, side=side, entry=entry, exit=exit_price,
+        pips=result_pips, status=status))
+    save_stats(s)
 
 def send(msg):
     for cid in IDS:
@@ -50,6 +79,26 @@ def candles(pair, interval=60, count=200):
     except Exception as e:
         print("OHLC error " + pair + ": " + str(e))
         return None
+
+def dxy_bias():
+    try:
+        eurusd = candles("EURUSD", 60, 50)
+        gbpusd = candles("GBPUSD", 60, 50)
+        usdjpy = candles("USDJPY", 60, 50)
+        if not eurusd or not gbpusd or not usdjpy:
+            return 0
+        e_chg = (eurusd["c"][-1] - eurusd["c"][-24]) / eurusd["c"][-24]
+        g_chg = (gbpusd["c"][-1] - gbpusd["c"][-24]) / gbpusd["c"][-24]
+        j_chg = (usdjpy["c"][-1] - usdjpy["c"][-24]) / usdjpy["c"][-24]
+        usd_strength = (-e_chg) + (-g_chg) + j_chg
+        if usd_strength > 0.005:
+            return 1
+        if usd_strength < -0.005:
+            return -1
+        return 0
+    except Exception as e:
+        print("DXY error: " + str(e))
+        return 0
 
 def ema(closes, n):
     if len(closes) < n:
@@ -303,7 +352,18 @@ def daily_ok():
     if daily["losses"] >= 2: return False
     return True
 
-def analyze(pair_name, kraken_pair, nc, kz_mult):
+def correlated_blocked(pair_name, sig):
+    for a, b in CORRELATED:
+        other = b if pair_name == a else (a if pair_name == b else None)
+        if not other: continue
+        op = open_positions.get(other)
+        if op is not None:
+            other_sig = op["sig"] if isinstance(op, dict) else op
+            if other_sig == sig:
+                return True
+    return False
+
+def analyze(pair_name, kraken_pair, nc, kz_mult, dxy, usd_side):
     D1  = candles(kraken_pair, 1440, 60)
     H4  = candles(kraken_pair, 240, 100)
     H1  = candles(kraken_pair, 60, 200)
@@ -355,6 +415,9 @@ def analyze(pair_name, kraken_pair, nc, kz_mult):
     if cv15 in ["BULL_PIN", "BULL_ENG"]: bs += 1; br.append("Bougie M15 : " + cv15)
     if vsp:         bs += 1; br.append("Volume spike")
     if nc["status"] == 2: bs += 1; br.append("Post-news opportunite")
+    # DXY context: if pair has USD as quote (EURUSD, GBPUSD, XAUUSD), USD weak (-1) = bullish
+    if usd_side == "quote" and dxy == -1: bs += 2; br.append("USD faible (DXY)")
+    if usd_side == "base" and dxy == 1: bs += 2; br.append("USD fort (DXY)")
     if nc["bias"] == 1 and "USD" in pair_name: bs += 1; br.append("Biais news USD fort")
     ss = 0; sr = []
     if sd1 == -1:   ss += 3; sr.append("D1 baissier")
@@ -378,9 +441,11 @@ def analyze(pair_name, kraken_pair, nc, kz_mult):
     if cv15 in ["BEAR_PIN", "BEAR_ENG"]: ss += 1; sr.append("Bougie M15 : " + cv15)
     if vsp:         ss += 1; sr.append("Volume spike")
     if nc["status"] == 2: ss += 1; sr.append("Post-news opportunite")
+    if usd_side == "quote" and dxy == 1: ss += 2; sr.append("USD fort (DXY)")
+    if usd_side == "base" and dxy == -1: ss += 2; sr.append("USD faible (DXY)")
     if nc["bias"] == -1 and "USD" in pair_name: ss += 1; sr.append("Biais news USD faible")
     THRESH = 12
-    MAX = 32
+    MAX = 34
     if bs >= THRESH and bs > ss:
         sig = 1; sc = bs; reasons = br
     elif ss >= THRESH and ss > bs:
@@ -388,38 +453,27 @@ def analyze(pair_name, kraken_pair, nc, kz_mult):
     else:
         return None
     conf = min(95, int(sc / MAX * 100))
-    stars = "" 
-    if conf >= 80: stars = "[***]"
-    elif conf >= 60: stars = "[**]"
-    else: stars = "[*]"
     sh_pts, sl_pts = swings(H1["h"], H1["l"])
     if sig == 1:
         sl_s = sl_pts[-1][1] - atrv * 0.3 if sl_pts else price - atrv * 1.5
         sl = min(sl_s, price - atrv * 1.5)
         tp1 = price + (price - sl) * 1.5
-        tp2 = price + (price - sl) * 2.5
-        tp3 = price + (price - sl) * 4.0
     else:
         sl_s = sh_pts[-1][1] + atrv * 0.3 if sh_pts else price + atrv * 1.5
         sl = max(sl_s, price + atrv * 1.5)
         tp1 = price - (sl - price) * 1.5
-        tp2 = price - (sl - price) * 2.5
-        tp3 = price - (sl - price) * 4.0
     pip_size = 0.01 if "JPY" in pair_name else (0.1 if "XAU" in pair_name else 0.0001)
     sl_pips = abs(price - sl) / pip_size
     pv = next((p["pip_val"] for p in PAIRS if p["name"] == pair_name), 10)
     lm = 0.5 if nc["status"] == 3 else 1.0
     lv = lot_size(sl_pips, pv, lm * kz_mult)
-    sd1_txt = "BULLISH" if sd1 == 1 else ("BEARISH" if sd1 == -1 else "NEUTRAL")
     sh4_txt = "BULLISH" if sh4 == 1 else ("BEARISH" if sh4 == -1 else "NEUTRAL")
-    sh1_txt = "BULLISH" if sh1 == 1 else ("BEARISH" if sh1 == -1 else "NEUTRAL")
-    sm15_txt = "BULLISH" if sm15 == 1 else ("BEARISH" if sm15 == -1 else "NEUTRAL")
-    return dict(sig=sig, sc=sc, MAX=MAX, conf=conf, stars=stars, price=price, sl=sl,
-                tp1=tp1, tp2=tp2, tp3=tp3, sl_pips=sl_pips, lot=lv,
-                rsi=rv, stoch=stv, sd1=sd1_txt, sh4=sh4_txt, sh1=sh1_txt,
-                sm15=sm15_txt, cv=cv, vsp=vsp, reasons=reasons[:8], dec=dec, nc=nc)
+    return dict(sig=sig, sc=sc, MAX=MAX, conf=conf, price=price, sl=sl,
+                tp1=tp1, sl_pips=sl_pips, lot=lv,
+                rsi=rv, stoch=stv, sh4=sh4_txt,
+                cv=cv, vsp=vsp, reasons=reasons[:8], dec=dec, nc=nc)
 
-def check(pair, events):
+def check(pair, events, dxy):
     name = pair["name"]
     if not daily_ok(): return
     nc = classify_news(name, events)
@@ -427,57 +481,157 @@ def check(pair, events):
         key = name + nc["reason"]
         if last_news_alert.get(name) != key:
             last_news_alert[name] = key
-            send("PAUSE " + name + chr(10) + nc["reason"] + chr(10) + nc["action"] + chr(10) + "Signal envoye apres la news")
+            send("PAUSE " + name + chr(10) + nc["reason"] + chr(10) + nc["action"])
         return
     last_news_alert[name] = None
     kz_name, kz_mult = kill_zone()
     if kz_mult < 0.7: return
-    res = analyze(name, pair["kraken"], nc, kz_mult)
+    res = analyze(name, pair["kraken"], nc, kz_mult, dxy, pair["usd_side"])
     if not res: return
     sig = res["sig"]
     sig_txt = "ACHAT" if sig == 1 else "VENTE"
+    if correlated_blocked(name, sig):
+        return
     cur = open_positions.get(name)
-    if cur and cur != sig:
-        cur_txt = "ACHAT" if cur == 1 else "VENTE"
+    cur_sig = cur["sig"] if isinstance(cur, dict) else cur
+    if cur_sig and cur_sig != sig:
+        cur_txt = "ACHAT" if cur_sig == 1 else "VENTE"
         send("RETOURNEMENT " + name + chr(10) + "Ferme " + cur_txt + chr(10) + "Nouveau : " + sig_txt)
     key = name + str(sig)
     if last_signals.get(key): return
     last_signals[key] = True
-    open_positions[name] = sig
+    open_positions[name] = dict(sig=sig, entry=res["price"], sl=res["sl"], tp=res["tp1"], opened=datetime.now().isoformat())
     daily["count"] += 1
     dec = res["dec"]
     icon = "BUY" if sig == 1 else "SELL"
     nc_info = res["nc"]
-    msg = icon + " " + res["stars"] + " SIGNAL " + sig_txt + " - " + name + chr(10)
+    msg = icon + " SIGNAL " + sig_txt + " - " + name + chr(10)
     msg += "========================" + chr(10)
     msg += "Prix  : " + str(round(res["price"], dec)) + chr(10)
     msg += "SL    : " + str(round(res["sl"], dec)) + " (" + str(round(res["sl_pips"])) + " pips)" + chr(10)
-    msg += "TP1   : " + str(round(res["tp1"], dec)) + " (RR 1:1.5)" + chr(10)
-    msg += "TP2   : " + str(round(res["tp2"], dec)) + " (RR 1:2.5)" + chr(10)
-    msg += "TP3   : " + str(round(res["tp3"], dec)) + " (RR 1:4)" + chr(10)
-    msg += "Lot   : " + str(res["lot"]) + chr(10)
+    msg += "TP    : " + str(round(res["tp1"], dec)) + chr(10)
+    msg += "Ratio : 1:1.5" + chr(10)
     msg += "========================" + chr(10)
-    msg += "Confiance : " + str(res["conf"]) + "% (" + str(res["sc"]) + "/" + str(res["MAX"]) + ")" + chr(10)
-    msg += "Session   : " + kz_name + chr(10)
-    msg += "D1  : " + res["sd1"] + chr(10)
-    msg += "H4  : " + res["sh4"] + chr(10)
-    msg += "H1  : " + res["sh1"] + chr(10)
-    msg += "M15 : " + res["sm15"] + chr(10)
-    msg += "RSI : " + str(round(res["rsi"],1)) + " | Stoch : " + str(round(res["stoch"],1)) + chr(10)
-    if res["cv"] != "NONE": msg += "Bougie : " + res["cv"] + chr(10)
-    if res["vsp"]: msg += "Volume spike detecte" + chr(10)
+    msg += "RSI     : " + str(round(res["rsi"],1)) + chr(10)
+    msg += "Stoch   : " + str(round(res["stoch"],1)) + chr(10)
+    msg += "H4      : " + res["sh4"] + chr(10)
+    msg += "Session : " + kz_name + chr(10)
+    msg += "Score   : " + str(res["sc"]) + "/" + str(res["MAX"]) + chr(10)
+    msg += "Confiance: " + str(res["conf"]) + "%" + chr(10)
     if nc_info["status"] != 0:
         msg += "========================" + chr(10)
         msg += "NEWS : " + nc_info["reason"] + chr(10)
         msg += nc_info["action"] + chr(10)
     msg += "========================" + chr(10)
-    msg += "Confluences SMC :" + chr(10)
     for r in res["reasons"]:
-        msg += "  - " + r + chr(10)
-    msg += "========================" + chr(10)
-    msg += "Risque 1% - Signal indicatif"
+        msg += "- " + r + chr(10)
+    msg += chr(10) + "Signal indicatif - risque 1% max"
     send(msg)
     print("[" + datetime.now().strftime("%H:%M") + "] " + name + " " + sig_txt + " " + str(res["conf"]) + "%")
+
+def check_levels():
+    for name in list(open_positions.keys()):
+        pos = open_positions[name]
+        if not isinstance(pos, dict): continue
+        pair = next((p for p in PAIRS if p["name"] == name), None)
+        if not pair: continue
+        m15 = candles(pair["kraken"], 15, 5)
+        if not m15: continue
+        last_high = m15["h"][-1]
+        last_low = m15["l"][-1]
+        sig = pos["sig"]
+        entry = pos["entry"]
+        sl = pos["sl"]
+        tp = pos["tp"]
+        pip_size = 0.01 if "JPY" in name else (0.1 if "XAU" in name else 0.0001)
+        hit_sl = (sig == 1 and last_low <= sl) or (sig == -1 and last_high >= sl)
+        hit_tp = (sig == 1 and last_high >= tp) or (sig == -1 and last_low <= tp)
+        if hit_sl:
+            pips = -abs(entry - sl) / pip_size
+            sig_txt = "ACHAT" if sig == 1 else "VENTE"
+            send("SL TOUCHE - " + name + chr(10) + "Position: " + sig_txt + chr(10) + "Entree: " + str(round(entry,5)) + chr(10) + "SL: " + str(round(sl,5)) + chr(10) + "Resultat: " + str(int(pips)) + " pips")
+            add_trade(name, sig_txt, entry, sl, int(pips), "SL")
+            del open_positions[name]
+            daily["losses"] += 1
+            for k in list(last_signals.keys()):
+                if k.startswith(name): del last_signals[k]
+        elif hit_tp:
+            pips = abs(tp - entry) / pip_size
+            sig_txt = "ACHAT" if sig == 1 else "VENTE"
+            send("TP ATTEINT - " + name + chr(10) + "Position: " + sig_txt + chr(10) + "Entree: " + str(round(entry,5)) + chr(10) + "TP: " + str(round(tp,5)) + chr(10) + "Resultat: +" + str(int(pips)) + " pips")
+            add_trade(name, sig_txt, entry, tp, int(pips), "TP")
+            del open_positions[name]
+            for k in list(last_signals.keys()):
+                if k.startswith(name): del last_signals[k]
+
+def daily_recap():
+    global last_daily_recap
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    if now.hour < 22: return
+    if last_daily_recap == today: return
+    s = load_stats()
+    todays = [t for t in s["trades"] if t["date"] == today]
+    if not todays:
+        last_daily_recap = today
+        return
+    by_pair = {}
+    for t in todays:
+        p = t["pair"]
+        if p not in by_pair: by_pair[p] = dict(w=0, l=0, pips=0)
+        if t["status"] == "TP": by_pair[p]["w"] += 1
+        else: by_pair[p]["l"] += 1
+        by_pair[p]["pips"] += t["pips"]
+    msg = "RECAP DU JOUR - " + now.strftime("%d/%m/%Y") + chr(10)
+    msg += "========================" + chr(10)
+    total_pips = 0; total_w = 0; total_l = 0
+    for p, d in by_pair.items():
+        sign = "+" if d["pips"] >= 0 else ""
+        msg += p + " : " + str(d["w"]+d["l"]) + " trades - " + str(d["w"]) + "W " + str(d["l"]) + "L - " + sign + str(d["pips"]) + " pips" + chr(10)
+        total_pips += d["pips"]; total_w += d["w"]; total_l += d["l"]
+    msg += "========================" + chr(10)
+    total = total_w + total_l
+    wr = int(100 * total_w / total) if total > 0 else 0
+    sign = "+" if total_pips >= 0 else ""
+    msg += "Total : " + str(total) + " trades - " + str(wr) + "% win rate" + chr(10)
+    msg += "Pips  : " + sign + str(total_pips) + " pips"
+    send(msg)
+    last_daily_recap = today
+
+def weekly_recap():
+    global last_weekly_recap
+    now = datetime.now()
+    if now.weekday() != 6 or now.hour < 22: return
+    week = now.strftime("%Y-W%U")
+    if last_weekly_recap == week: return
+    s = load_stats()
+    week_start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+    week_trades = [t for t in s["trades"] if t["date"] >= week_start]
+    if not week_trades:
+        last_weekly_recap = week
+        return
+    by_pair = {}
+    for t in week_trades:
+        p = t["pair"]
+        if p not in by_pair: by_pair[p] = dict(w=0, l=0, pips=0)
+        if t["status"] == "TP": by_pair[p]["w"] += 1
+        else: by_pair[p]["l"] += 1
+        by_pair[p]["pips"] += t["pips"]
+    msg = "RECAP HEBDO" + chr(10)
+    msg += "========================" + chr(10)
+    total_pips = 0; total_w = 0; total_l = 0
+    for p, d in by_pair.items():
+        sign = "+" if d["pips"] >= 0 else ""
+        msg += p + " : " + str(d["w"]+d["l"]) + " trades - " + str(d["w"]) + "W " + str(d["l"]) + "L - " + sign + str(d["pips"]) + " pips" + chr(10)
+        total_pips += d["pips"]; total_w += d["w"]; total_l += d["l"]
+    msg += "========================" + chr(10)
+    total = total_w + total_l
+    wr = int(100 * total_w / total) if total > 0 else 0
+    sign = "+" if total_pips >= 0 else ""
+    msg += "Total : " + str(total) + " trades - " + str(wr) + "% win rate" + chr(10)
+    msg += "Pips  : " + sign + str(total_pips) + " pips"
+    send(msg)
+    last_weekly_recap = week
 
 def reset_check():
     global last_reset
@@ -486,20 +640,24 @@ def reset_check():
         last_reset = datetime.now()
 
 now = datetime.now().strftime("%d/%m/%Y %H:%M")
-send("ARBI BOT PRO v7 - " + now + chr(10) + "Paires : EUR/USD GBP/USD USD/JPY XAU/USD" + chr(10) + "Kill Zones + SMC + News Pro" + chr(10) + "Seuil : 12/32 confluences" + chr(10) + "En surveillance...")
-print("ArbiBot Pro v7 demarre")
+send("ARBI BOT PRO v8 - " + now + chr(10) + "Paires : EUR/USD GBP/USD USD/JPY XAU/USD" + chr(10) + "Kill Zones + SMC + News Pro + DXY" + chr(10) + "Anti-correlation + Recap auto" + chr(10) + "Seuil : 12/34 confluences" + chr(10) + "Mode 100% automatique")
+print("ArbiBot Pro v8 demarre")
 
 while True:
     try:
         events = get_news()
+        dxy = dxy_bias()
         for p in PAIRS:
             try:
-                check(p, events)
+                check(p, events, dxy)
             except Exception as e:
                 print("Error " + p["name"] + ": " + str(e))
             time.sleep(2)
+        check_levels()
+        daily_recap()
+        weekly_recap()
         reset_check()
-        print("[" + datetime.now().strftime("%H:%M") + "] Cycle ok")
+        print("[" + datetime.now().strftime("%H:%M") + "] Cycle ok DXY=" + str(dxy))
         time.sleep(SCAN_INTERVAL)
     except KeyboardInterrupt:
         break
