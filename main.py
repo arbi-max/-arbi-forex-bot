@@ -1,666 +1,639 @@
+#!/usr/bin/env python3
+"""
+ARBI BOT CERVEAU v1.0
+Bot 1 — Cerveau (Railway/Python)
+- Analyse SMC avancee
+- Detection de regime
+- Multi-strategies
+- Score de qualite
+- Filtre news
+- ML adaptatif
+- Serveur web Flask
+- Recoit resultats de Bot 2
+- Apprend de chaque trade
+"""
+
 import requests
 import time
-import os
 import json
-from datetime import datetime, timezone, timedelta
+import os
+from datetime import datetime, timezone
+from flask import Flask, request, jsonify
+from threading import Thread
 
-TOKEN = os.environ.get("TOKEN", "")
-IDS = ["525011337", "7276558677"]
+# ═══════════════════════════════════════════════════
+# CONFIGURATION
+# ═══════════════════════════════════════════════════
+TOKEN    = "8636672541:AAElNEq4IKwrRzTLuqoaqttadmkGKAVEVlM"
+IDS      = ["525011337", "7276558677"]
 
 PAIRS = [
-    dict(name="EUR/USD", kraken="EURUSD", pip=0.0001, pip_val=10, usd_side="quote"),
-    dict(name="GBP/USD", kraken="GBPUSD", pip=0.0001, pip_val=10, usd_side="quote"),
-    dict(name="USD/JPY", kraken="USDJPY", pip=0.01,   pip_val=9,  usd_side="base"),
-    dict(name="XAU/USD", kraken="PAXGUSD", pip=0.1,   pip_val=1,  usd_side="quote"),
+    {"name": "EURUSD", "kraken": "EURUSD", "pip": 0.0001},
+    {"name": "GBPUSD", "kraken": "GBPUSD", "pip": 0.0001},
+    {"name": "USDJPY", "kraken": "USDJPY", "pip": 0.01},
+    {"name": "XAUUSD", "kraken": "XAUUSD", "pip": 0.01},
 ]
 
-CORRELATED = [("EUR/USD", "GBP/USD")]
-
-CAPITAL    = 10000
+CAPITAL    = 10000.0
 RISK_PCT   = 1.0
 MAX_TRADES = 3
-SCAN_INTERVAL = 300
-STATS_FILE = "stats.json"
+DATA_FILE  = "brain_data.json"
 
-last_signals    = {}
-open_positions  = {}
-daily           = dict(date="", count=0, losses=0)
-last_news_alert = {}
-last_reset      = datetime.now()
-last_daily_recap = ""
-last_weekly_recap = ""
+# ═══════════════════════════════════════════════════
+# FLASK SERVER
+# ═══════════════════════════════════════════════════
+app = Flask(__name__)
 
-def load_stats():
+# Signal actuel pour Bot 2
+current_signal = {
+    "signal": "NONE",
+    "pair": "",
+    "entry": 0,
+    "sl": 0,
+    "tp1": 0,
+    "tp2": 0,
+    "lot": 0,
+    "score": 0,
+    "regime": "",
+    "timestamp": ""
+}
+
+@app.route("/signal", methods=["GET"])
+def get_signal():
+    """Bot 2 interroge ce endpoint pour obtenir le signal"""
+    return jsonify(current_signal)
+
+@app.route("/result", methods=["POST"])
+def receive_result():
+    """Bot 2 envoie le resultat du trade ici"""
+    data = request.json
+    if not data:
+        return jsonify({"status": "error"}), 400
+
+    pair     = data.get("pair", "")
+    result   = data.get("result", "")  # WIN ou LOSS
+    pnl      = data.get("pnl", 0)
+    score    = data.get("score", 0)
+    regime   = data.get("regime", "")
+
+    print(f"[RESULTAT] {pair} {result} PnL={pnl} Score={score}")
+
+    # Enregistrer et apprendre
+    record_and_learn(pair, result, pnl, score, regime)
+
+    # Notifier Telegram
+    icon = "GAGNE" if result == "WIN" else "PERDU"
+    msg  = f"{icon} — {pair}\n"
+    msg += f"Resultat : {result}\n"
+    msg += f"P&L      : {pnl:+.2f}$\n"
+    msg += f"Score    : {score}/10\n"
+    msg += f"Regime   : {regime}\n"
+    msg += f"Bot apprend et s'ameliore !"
+    send_telegram(msg)
+
+    return jsonify({"status": "ok"})
+
+@app.route("/status", methods=["GET"])
+def status():
+    """Status du bot"""
+    brain = load_data()
+    wins   = sum(1 for t in brain["trades"] if t["result"] == "WIN")
+    losses = sum(1 for t in brain["trades"] if t["result"] == "LOSS")
+    total  = wins + losses
+    wr     = round(wins/total*100, 1) if total > 0 else 0
+    return jsonify({
+        "status": "running",
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "winrate": wr,
+        "min_score": brain["params"]["min_score"],
+        "risk_pct": brain["params"]["risk_pct"],
+        "current_signal": current_signal
+    })
+
+# ═══════════════════════════════════════════════════
+# PERSISTANCE ET APPRENTISSAGE
+# ═══════════════════════════════════════════════════
+def load_data():
     try:
-        with open(STATS_FILE, "r") as f:
-            return json.load(f)
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, "r") as f:
+                return json.load(f)
     except:
-        return dict(trades=[])
+        pass
+    return {
+        "trades": [],
+        "params": {
+            "min_score": 6,
+            "risk_pct": 1.0,
+            "regime_weights": {
+                "TREND": 1.0,
+                "BREAKOUT": 0.8,
+                "PULLBACK": 0.9,
+                "RANGE": 0.6
+            }
+        }
+    }
 
-def save_stats(s):
+def save_data(data):
     try:
-        with open(STATS_FILE, "w") as f:
-            json.dump(s, f)
-    except Exception as e:
-        print("Stats save error: " + str(e))
+        with open(DATA_FILE, "w") as f:
+            json.dump(data, f)
+    except:
+        pass
 
-def add_trade(pair, side, entry, exit_price, result_pips, status):
-    s = load_stats()
-    s["trades"].append(dict(
-        date=datetime.now().strftime("%Y-%m-%d"),
-        time=datetime.now().strftime("%H:%M"),
-        pair=pair, side=side, entry=entry, exit=exit_price,
-        pips=result_pips, status=status))
-    save_stats(s)
+def record_and_learn(pair, result, pnl, score, regime):
+    """Enregistre le trade et adapte les parametres"""
+    brain = load_data()
 
-def send(msg):
+    # Enregistrer le trade
+    brain["trades"].append({
+        "date":   datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "pair":   pair,
+        "result": result,
+        "pnl":    pnl,
+        "score":  score,
+        "regime": regime
+    })
+    brain["trades"] = brain["trades"][-200:]
+
+    # APPRENTISSAGE ADAPTATIF
+    trades = brain["trades"]
+    if len(trades) >= 10:
+        recent = trades[-20:] if len(trades) >= 20 else trades
+        wins   = sum(1 for t in recent if t["result"] == "WIN")
+        total  = len(recent)
+        wr     = wins / total
+
+        # Ajuster score minimum
+        current_score = brain["params"]["min_score"]
+        if wr < 0.40:
+            brain["params"]["min_score"] = min(9, current_score + 1)
+            print(f"[ML] Winrate faible {wr:.0%} -> Score min augmente a {brain['params']['min_score']}")
+        elif wr > 0.65:
+            brain["params"]["min_score"] = max(4, current_score - 1)
+            print(f"[ML] Winrate fort {wr:.0%} -> Score min baisse a {brain['params']['min_score']}")
+
+        # Ajuster risque
+        if wr < 0.40:
+            brain["params"]["risk_pct"] = max(0.5, brain["params"]["risk_pct"] - 0.1)
+        elif wr > 0.65:
+            brain["params"]["risk_pct"] = min(1.5, brain["params"]["risk_pct"] + 0.1)
+
+        # Ajuster poids des regimes
+        if regime and len(trades) >= 10:
+            regime_trades = [t for t in recent if t["regime"] == regime]
+            if len(regime_trades) >= 3:
+                regime_wins = sum(1 for t in regime_trades if t["result"] == "WIN")
+                regime_wr   = regime_wins / len(regime_trades)
+                weight = brain["params"]["regime_weights"].get(regime, 1.0)
+                if regime_wr < 0.40:
+                    brain["params"]["regime_weights"][regime] = max(0.3, weight - 0.1)
+                elif regime_wr > 0.65:
+                    brain["params"]["regime_weights"][regime] = min(1.5, weight + 0.1)
+
+    save_data(brain)
+    print(f"[ML] Params: score_min={brain['params']['min_score']} risk={brain['params']['risk_pct']:.1f}%")
+
+# ═══════════════════════════════════════════════════
+# TELEGRAM
+# ═══════════════════════════════════════════════════
+def send_telegram(msg):
     for cid in IDS:
         try:
-            url = "https://api.telegram.org/bot" + TOKEN + "/sendMessage"
-            requests.post(url, json=dict(chat_id=cid, text=msg), timeout=10)
-        except Exception as e:
-            print("Telegram error: " + str(e))
-        time.sleep(0.3)
+            requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                json={"chat_id": cid, "text": msg},
+                timeout=10)
+        except:
+            pass
+        time.sleep(0.5)
 
-def candles(pair, interval=60, count=200):
+# ═══════════════════════════════════════════════════
+# DONNEES KRAKEN
+# ═══════════════════════════════════════════════════
+def get_candles(pair, interval=60, count=200):
     try:
-        url = "https://api.kraken.com/0/public/OHLC"
-        r = requests.get(url, params=dict(pair=pair, interval=interval), timeout=10)
+        r = requests.get(
+            "https://api.kraken.com/0/public/OHLC",
+            params={"pair": pair, "interval": interval},
+            timeout=10)
         d = r.json()["result"]
         k = [x for x in d if x != "last"][0]
-        data = d[k][-count:]
-        return dict(
-            o=[float(c[1]) for c in data],
-            h=[float(c[2]) for c in data],
-            l=[float(c[3]) for c in data],
-            c=[float(c[4]) for c in data],
-            v=[float(c[6]) for c in data],
-        )
-    except Exception as e:
-        print("OHLC error " + pair + ": " + str(e))
+        rows = d[k][-count:]
+        return {
+            "o": [float(x[1]) for x in rows],
+            "h": [float(x[2]) for x in rows],
+            "l": [float(x[3]) for x in rows],
+            "c": [float(x[4]) for x in rows],
+            "v": [float(x[6]) for x in rows],
+        }
+    except:
         return None
 
-def dxy_bias():
-    try:
-        eurusd = candles("EURUSD", 60, 50)
-        gbpusd = candles("GBPUSD", 60, 50)
-        usdjpy = candles("USDJPY", 60, 50)
-        if not eurusd or not gbpusd or not usdjpy:
-            return 0
-        e_chg = (eurusd["c"][-1] - eurusd["c"][-24]) / eurusd["c"][-24]
-        g_chg = (gbpusd["c"][-1] - gbpusd["c"][-24]) / gbpusd["c"][-24]
-        j_chg = (usdjpy["c"][-1] - usdjpy["c"][-24]) / usdjpy["c"][-24]
-        usd_strength = (-e_chg) + (-g_chg) + j_chg
-        if usd_strength > 0.005:
-            return 1
-        if usd_strength < -0.005:
-            return -1
-        return 0
-    except Exception as e:
-        print("DXY error: " + str(e))
-        return 0
-
-def ema(closes, n):
-    if len(closes) < n:
-        return closes[-1]
-    k = 2.0 / (n + 1)
-    e = sum(closes[:n]) / n
-    for p in closes[n:]:
-        e = p * k + e * (1 - k)
+# ═══════════════════════════════════════════════════
+# INDICATEURS
+# ═══════════════════════════════════════════════════
+def ema(c, n):
+    if len(c) < n: return c[-1]
+    k = 2/(n+1); e = sum(c[:n])/n
+    for p in c[n:]: e = p*k + e*(1-k)
     return e
 
-def rsi(closes, n=14):
-    if len(closes) < n + 1:
-        return 50
-    g = 0.0
-    lo = 0.0
-    for i in range(len(closes) - n, len(closes)):
-        d = closes[i] - closes[i - 1]
-        if d > 0:
-            g += d
-        else:
-            lo -= d
-    return 100 - 100 / (1 + g / (lo or 0.001))
+def rsi(c, n=14):
+    g = l = 0.0
+    for i in range(len(c)-n, len(c)):
+        d = c[i]-c[i-1]
+        if d > 0: g += d
+        else: l -= d
+    return 100 - 100/(1+g/(l or 0.001))
 
-def rsi_div(closes):
-    if len(closes) < 40:
-        return 0
-    r1 = rsi(closes[-40:-20])
-    r2 = rsi(closes[-20:])
-    if min(closes[-20:]) < min(closes[-40:-20]) and r2 > r1:
-        return 1
-    if max(closes[-20:]) > max(closes[-40:-20]) and r2 < r1:
-        return -1
-    return 0
+def macd(c):
+    return ema(c, 12) - ema(c, 26)
 
-def macd(closes):
-    if len(closes) < 26:
-        return 0
-    return ema(closes, 12) - ema(closes, 26)
+def atr(h, l, c, n=14):
+    trs = [max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1]))
+           for i in range(1, len(c))]
+    return sum(trs[-n:])/n
 
-def bollinger(closes, n=20):
-    if len(closes) < n:
-        return closes[-1], closes[-1], closes[-1]
-    s = closes[-n:]
-    mid = sum(s) / len(s)
-    std = (sum((x - mid) ** 2 for x in s) / len(s)) ** 0.5
-    return mid + 2 * std, mid - 2 * std, mid
-
-def stoch(highs, lows, closes, n=14):
-    if len(closes) < n:
-        return 50
-    h = max(highs[-n:])
-    l = min(lows[-n:])
-    if h == l:
-        return 50
-    return 100 * (closes[-1] - l) / (h - l)
-
-def atr(highs, lows, closes, n=14):
-    if len(closes) < n + 1:
-        return highs[-1] - lows[-1]
-    trs = []
-    for i in range(1, len(closes)):
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        trs.append(tr)
-    return sum(trs[-n:]) / n
-
-def vol_spike(v, n=20):
-    if len(v) < n + 1:
-        return False
-    avg = sum(v[-n-1:-1]) / n
-    return v[-1] > avg * 1.5
-
-def swings(highs, lows, lb=5):
-    sh = []
-    sl = []
-    for i in range(lb, len(highs) - lb):
-        if all(highs[i] >= highs[i-j] for j in range(1, lb+1)) and all(highs[i] >= highs[i+j] for j in range(1, lb+1)):
-            sh.append((i, highs[i]))
-        if all(lows[i] <= lows[i-j] for j in range(1, lb+1)) and all(lows[i] <= lows[i+j] for j in range(1, lb+1)):
-            sl.append((i, lows[i]))
-    return sh, sl
-
-def structure(highs, lows, closes):
-    sh, sl = swings(highs, lows)
-    if len(sh) < 2 or len(sl) < 2:
-        return 0, 0, 0
-    hh = sh[-1][1] > sh[-2][1]
-    hl = sl[-1][1] > sl[-2][1]
-    lh = sh[-1][1] < sh[-2][1]
-    ll = sl[-1][1] < sl[-2][1]
-    if hh and hl:
-        st = 1
-    elif lh and ll:
-        st = -1
-    else:
-        st = 0
-    price = closes[-1]
-    bos = 0
-    choch = 0
-    if st == 1 and price > sh[-1][1]:
-        bos = 1
-    if st == -1 and price < sl[-1][1]:
-        bos = -1
-    if st == 1 and price < sl[-1][1]:
-        choch = -1
-    if st == -1 and price > sh[-1][1]:
-        choch = 1
-    return st, bos, choch
-
-def order_blocks(opens, highs, lows, closes, lb=50):
-    bull = []
-    bear = []
-    start = max(1, len(closes) - lb)
-    for i in range(start, len(closes) - 1):
-        if closes[i] < opens[i] and closes[i+1] > highs[i]:
-            bull.append(dict(h=highs[i], l=lows[i], mid=(highs[i]+lows[i])/2))
-        if closes[i] > opens[i] and closes[i+1] < lows[i]:
-            bear.append(dict(h=highs[i], l=lows[i], mid=(highs[i]+lows[i])/2))
-    return bull[-3:], bear[-3:]
-
-def fair_value_gaps(highs, lows, lb=50):
-    bull = []
-    bear = []
-    start = max(0, len(highs) - lb)
-    for i in range(start, len(highs) - 2):
-        if lows[i+2] > highs[i]:
-            bull.append(dict(mid=(lows[i+2]+highs[i])/2))
-        if highs[i+2] < lows[i]:
-            bear.append(dict(mid=(lows[i]+highs[i+2])/2))
-    return bull[-3:], bear[-3:]
-
-def sweep(highs, lows, closes):
-    sh, sl = swings(highs, lows)
-    if not sh or not sl:
-        return 0, 0
-    prev = closes[-2]
-    price = closes[-1]
-    sh_val = 1 if (prev > sh[-1][1] and price < sh[-1][1]) else 0
-    sl_val = 1 if (prev < sl[-1][1] and price > sl[-1][1]) else 0
-    return sh_val, sl_val
-
-def in_ob(price, obs):
-    for x in obs:
-        if x["l"] <= price <= x["h"]:
-            return True
-    return False
-
-def near_fvg(price, fvgs, thr=0.0025):
-    for x in fvgs:
-        if abs(price - x["mid"]) / price < thr:
-            return True
-    return False
-
-def candle_pat(opens, highs, lows, closes):
-    if len(closes) < 2:
-        return "NONE"
-    body = abs(closes[-1] - opens[-1])
-    rng = highs[-1] - lows[-1]
-    if rng == 0:
-        return "NONE"
-    lw = min(opens[-1], closes[-1]) - lows[-1]
-    uw = highs[-1] - max(opens[-1], closes[-1])
-    if lw > body * 2 and uw < body * 0.5:
-        return "BULL_PIN"
-    if uw > body * 2 and lw < body * 0.5:
-        return "BEAR_PIN"
-    if closes[-1] > opens[-1] and closes[-2] < opens[-2] and closes[-1] > opens[-2] and opens[-1] < closes[-2] and body/rng > 0.6:
-        return "BULL_ENG"
-    if closes[-1] < opens[-1] and closes[-2] > opens[-2] and closes[-1] < opens[-2] and opens[-1] > closes[-2] and body/rng > 0.6:
-        return "BEAR_ENG"
+def rsi_divergence(c):
+    if len(c) < 30: return "NONE"
+    r1 = rsi(c[-30:-15]); r2 = rsi(c[-15:])
+    if c[-1] < c[-15] and r2 > r1: return "BULL"
+    if c[-1] > c[-15] and r2 < r1: return "BEAR"
     return "NONE"
 
-def kill_zone():
-    h = datetime.now(timezone.utc).hour
-    m = datetime.now(timezone.utc).minute
-    t = h * 60 + m
-    if 420 <= t <= 600:
-        return "London Kill Zone", 1.3
-    if 780 <= t <= 960:
-        return "NY Kill Zone", 1.3
-    if 600 <= t <= 780:
-        return "London+NY Overlap", 1.2
-    if 120 <= t <= 300:
-        return "Tokyo Session", 0.8
-    return "Hors session", 0.6
+# ═══════════════════════════════════════════════════
+# DETECTION DE REGIME
+# ═══════════════════════════════════════════════════
+def detect_regime(h, l, c, h4_c):
+    """Detecte le regime de marche"""
+    atr_v    = atr(h, l, c)
+    atr_avg  = sum([atr(h[:-i*5] if i*5 < len(h) else h,
+                        l[:-i*5] if i*5 < len(l) else l,
+                        c[:-i*5] if i*5 < len(c) else c)
+                    for i in range(1, 5)]) / 4
 
+    e50  = ema(c, 50)
+    e200 = ema(c, 100)
+    price = c[-1]
+
+    # Volatilite
+    atr_ratio = atr_v / atr_avg if atr_avg > 0 else 1
+
+    # Tendance H4
+    e50_h4  = ema(h4_c, 50)
+    e200_h4 = ema(h4_c, 100)
+    trend_h4 = "BULL" if e50_h4 > e200_h4 else "BEAR"
+
+    # Range detection
+    highs = h[-20:]
+    lows  = l[-20:]
+    range_size = (max(highs) - min(lows)) / price
+    is_range = range_size < 0.005  # Range < 0.5%
+
+    if atr_ratio > 2.5:
+        return "INSTABLE", trend_h4
+    if is_range:
+        return "RANGE", trend_h4
+    if e50 > e200:
+        return "TREND_BULL", trend_h4
+    if e50 < e200:
+        return "TREND_BEAR", trend_h4
+    return "NEUTRAL", trend_h4
+
+# ═══════════════════════════════════════════════════
+# SMC
+# ═══════════════════════════════════════════════════
+def swing_points(h, l, lb=5):
+    sh, sl = [], []
+    for i in range(lb, len(h)-lb):
+        if all(h[i]>=h[i-j] for j in range(1,lb+1)) and all(h[i]>=h[i+j] for j in range(1,lb+1)):
+            sh.append((i, h[i]))
+        if all(l[i]<=l[i-j] for j in range(1,lb+1)) and all(l[i]<=l[i+j] for j in range(1,lb+1)):
+            sl.append((i, l[i]))
+    return sh, sl
+
+def detect_order_blocks(o, h, l, c, lb=30):
+    bull, bear = [], []
+    for i in range(max(1,len(c)-lb), len(c)-1):
+        if c[i]<o[i] and c[i+1]>h[i]:
+            bull.append({"h":h[i],"l":l[i],"mid":(h[i]+l[i])/2})
+        if c[i]>o[i] and c[i+1]<l[i]:
+            bear.append({"h":h[i],"l":l[i],"mid":(h[i]+l[i])/2})
+    return bull[-3:], bear[-3:]
+
+def detect_fvg(h, l, lb=30):
+    bull, bear = [], []
+    for i in range(max(0,len(h)-lb), len(h)-2):
+        if l[i+2]>h[i]:
+            bull.append({"top":l[i+2],"bot":h[i],"mid":(l[i+2]+h[i])/2})
+        if h[i+2]<l[i]:
+            bear.append({"top":l[i],"bot":h[i+2],"mid":(l[i]+h[i+2])/2})
+    return bull[-3:], bear[-3:]
+
+def sweep_low(h, l, c):
+    sh, sl = swing_points(h, l)
+    if not sl: return False
+    return l[-1] < sl[-1][1] and c[-1] > sl[-1][1]
+
+def sweep_high(h, l, c):
+    sh, sl = swing_points(h, l)
+    if not sh: return False
+    return h[-1] > sh[-1][1] and c[-1] < sh[-1][1]
+
+def in_ob(price, obs):
+    return any(ob["l"]<=price<=ob["h"] for ob in obs)
+
+def near_fvg(price, fvgs, thr=0.002):
+    return any(abs(price-f["mid"])/price < thr for f in fvgs)
+
+# ═══════════════════════════════════════════════════
+# NEWS FILTER
+# ═══════════════════════════════════════════════════
 def get_news():
     try:
-        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-        r = requests.get(url, timeout=10)
-        return r.json()
+        r = requests.get(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            timeout=10)
+        events = r.json()
+        now = datetime.now(timezone.utc)
+        result = []
+        for e in events:
+            if e.get("impact") in ["High", "Medium"]:
+                try:
+                    from datetime import datetime as dt
+                    et = dt.strptime(e["date"], "%Y-%m-%dT%H:%M:%S%z")
+                    diff = (et - now).total_seconds() / 60
+                    if -30 <= diff <= 60:
+                        result.append({
+                            "title":  e.get("title",""),
+                            "cur":    e.get("country",""),
+                            "impact": e.get("impact",""),
+                            "mins":   int(diff)
+                        })
+                except:
+                    pass
+        return result
     except:
         return []
 
-def classify_news(pair_name, events):
-    now = datetime.now(timezone.utc)
-    curs = ["USD"]
-    if "EUR" in pair_name: curs.append("EUR")
-    if "GBP" in pair_name: curs.append("GBP")
-    if "JPY" in pair_name: curs.append("JPY")
-    uh = []; jr = []; rh = []; um = []
-    for e in events:
-        impact = e.get("impact", "")
-        cur = e.get("country", "").upper()
-        if not any(c in cur for c in curs): continue
-        if impact not in ["High", "Medium"]: continue
-        try:
-            et = datetime.strptime(e["date"], "%Y-%m-%dT%H:%M:%S%z")
-            diff = (et - now).total_seconds() / 60
-            title = e.get("title", "")
-            country = e.get("country", "")
-            actual   = e.get("actual", "")
-            forecast = e.get("forecast", "")
-            if impact == "High":
-                if 0 < diff <= 45: uh.append(dict(title=title, country=country, mins=int(diff)))
-                elif -15 <= diff <= 0: jr.append(dict(title=title, country=country, mins=int(diff), actual=actual, forecast=forecast))
-                elif -60 <= diff < -15: rh.append(dict(title=title, country=country, mins=int(diff)))
-            elif impact == "Medium":
-                if 0 < diff <= 20: um.append(dict(title=title, country=country, mins=int(diff)))
-        except: pass
-    if uh:
-        n = uh[0]
-        return dict(status=1, reason="News ROUGE dans " + str(n["mins"]) + "min : " + n["title"], action="Attendre puis trader la reaction", bias=0)
-    if jr:
-        n = jr[0]
-        bias = 0
-        try:
-            a = float(n["actual"].replace("K","000").replace("%","").strip())
-            f = float(n["forecast"].replace("K","000").replace("%","").strip())
-            if a > f: bias = 1
-            elif a < f: bias = -1
-        except: pass
-        return dict(status=2, reason="News sortie il y a " + str(abs(n["mins"])) + "min : " + n["title"], action="Trader la reaction - confirmer M15", bias=bias)
-    if rh:
-        n = rh[0]
-        return dict(status=2, reason="Post-news " + str(abs(n["mins"])) + "min : " + n["title"], action="Marche en digestion", bias=0)
-    if um:
-        n = um[0]
-        return dict(status=3, reason="News ORANGE dans " + str(n["mins"]) + "min : " + n["title"], action="Lot reduit 50%", bias=0)
-    return dict(status=0, reason="", action="", bias=0)
+def is_news_blocked(pair):
+    events = get_news()
+    if not events: return False, []
+    curs = []
+    if "EUR" in pair: curs.append("EUR")
+    if "GBP" in pair: curs.append("GBP")
+    if "JPY" in pair: curs.append("JPY")
+    if "XAU" in pair: curs.append("USD")
+    curs.append("USD")
+    blocking = [e for e in events if any(c in e["cur"].upper() for c in curs) and e["impact"]=="High"]
+    return len(blocking) > 0, blocking
 
-def lot_size(sl_pips, pip_val=10, mult=1.0):
-    risk = CAPITAL * RISK_PCT / 100 * mult
-    lot = risk / (sl_pips * pip_val) if sl_pips > 0 else 0.01
-    return round(max(0.01, min(lot, 2.0)), 2)
+# ═══════════════════════════════════════════════════
+# SESSION
+# ═══════════════════════════════════════════════════
+def get_session():
+    h = datetime.now(timezone.utc).hour
+    if 7  <= h < 12: return "Londres", True
+    if 12 <= h < 16: return "Overlap", True
+    if 16 <= h < 21: return "NewYork", True
+    return "Hors session", False
 
-def daily_ok():
-    today = datetime.now().strftime("%Y-%m-%d")
-    if daily["date"] != today:
-        daily.update(dict(date=today, count=0, losses=0))
-    if daily["count"] >= MAX_TRADES: return False
-    if daily["losses"] >= 2: return False
-    return True
+# ═══════════════════════════════════════════════════
+# ANALYSE PRINCIPALE
+# ═══════════════════════════════════════════════════
+def analyze(pair):
+    brain = load_data()
+    min_score = brain["params"]["min_score"]
+    risk_pct  = brain["params"]["risk_pct"]
 
-def correlated_blocked(pair_name, sig):
-    for a, b in CORRELATED:
-        other = b if pair_name == a else (a if pair_name == b else None)
-        if not other: continue
-        op = open_positions.get(other)
-        if op is not None:
-            other_sig = op["sig"] if isinstance(op, dict) else op
-            if other_sig == sig:
-                return True
-    return False
-
-def analyze(pair_name, kraken_pair, nc, kz_mult, dxy, usd_side):
-    D1  = candles(kraken_pair, 1440, 60)
-    H4  = candles(kraken_pair, 240, 100)
-    H1  = candles(kraken_pair, 60, 200)
-    M15 = candles(kraken_pair, 15, 150)
+    H4  = get_candles(pair["kraken"], 240, 100)
+    H1  = get_candles(pair["kraken"], 60,  200)
+    M15 = get_candles(pair["kraken"], 15,  100)
     if not H4 or not H1 or not M15: return None
-    price = H1["c"][-1]
-    dec = 3 if "JPY" in pair_name else (1 if "XAU" in pair_name else 5)
-    sd1 = 0
-    if D1: sd1, _, _ = structure(D1["h"], D1["l"], D1["c"])
-    e200h4 = ema(H4["c"], 100)
-    sh4, _, _ = structure(H4["h"], H4["l"], H4["c"])
-    sh1, bh1, _ = structure(H1["h"], H1["l"], H1["c"])
-    sm15, _, ch15 = structure(M15["h"], M15["l"], M15["c"])
-    e9  = ema(H1["c"], 9)
-    e21 = ema(H1["c"], 21)
-    e50 = ema(H1["c"], 50)
-    rv  = rsi(H1["c"])
-    rd  = rsi_div(H1["c"])
-    mv  = macd(H1["c"])
-    bbu, bbl, _ = bollinger(H1["c"])
-    atrv = atr(H1["h"], H1["l"], H1["c"])
-    stv  = stoch(H1["h"], H1["l"], H1["c"])
-    vsp  = vol_spike(H1["v"])
-    cv   = candle_pat(H1["o"], H1["h"], H1["l"], H1["c"])
-    bob, beb = order_blocks(H1["o"], H1["h"], H1["l"], H1["c"])
-    bfv, bfb = fair_value_gaps(H1["h"], H1["l"])
-    swh, swl = sweep(H1["h"], H1["l"], H1["c"])
-    swh15, swl15 = sweep(M15["h"], M15["l"], M15["c"])
-    cv15 = candle_pat(M15["o"], M15["h"], M15["l"], M15["c"])
+
+    c = H1["c"]; h = H1["h"]; l = H1["l"]; o = H1["o"]
+    price = c[-1]
+    is_jpy = "JPY" in pair["name"]
+    dec = 3 if is_jpy else 5
+
+    # Detection regime
+    regime, trend_h4 = detect_regime(h, l, c, H4["c"])
+
+    # Bloquer si instable
+    if regime == "INSTABLE": return None
+
+    # Poids du regime
+    regime_key = regime.replace("TREND_BULL","TREND").replace("TREND_BEAR","TREND")
+    regime_weight = brain["params"]["regime_weights"].get(regime_key, 1.0)
+
+    # Indicateurs H1
+    e9   = ema(c, 9);   e21  = ema(c, 21)
+    e50  = ema(c, 50);  e200 = ema(c, 100)
+    e9p  = ema(c[:-1], 9); e21p = ema(c[:-1], 21)
+    r    = rsi(c)
+    m    = macd(c)
+    atr_v = atr(h, l, c)
+    rdiv = rsi_divergence(c)
+
+    # Indicateurs M15
+    e9_m15  = ema(M15["c"], 9)
+    e21_m15 = ema(M15["c"], 21)
+    e9_m15p = ema(M15["c"][:-1], 9)
+    e21_m15p= ema(M15["c"][:-1], 21)
+    r_m15   = rsi(M15["c"])
+
+    # SMC
+    bull_ob, bear_ob = detect_order_blocks(o, h, l, c)
+    bull_fvg, bear_fvg = detect_fvg(h, l)
+    sw_low  = sweep_low(h, l, c)
+    sw_high = sweep_high(h, l, c)
+    in_bull = in_ob(price, bull_ob)
+    in_bear = in_ob(price, bear_ob)
+    nr_bull = near_fvg(price, bull_fvg)
+    nr_bear = near_fvg(price, bear_fvg)
+
+    cross_up = e9p <= e21p and e9 > e21
+    cross_dn = e9p >= e21p and e9 < e21
+    m15_up   = e9_m15p <= e21_m15p and e9_m15 > e21_m15
+    m15_dn   = e9_m15p >= e21_m15p and e9_m15 < e21_m15
+
+    # ── SCORE BUY ──
     bs = 0; br = []
-    if sd1 == 1:    bs += 3; br.append("D1 haussier")
-    if sh4 == 1:    bs += 2; br.append("H4 HH+HL")
-    if sh1 == 1:    bs += 2; br.append("H1 haussier")
-    if price > e200h4: bs += 1; br.append("Prix > EMA200 H4")
-    if swl:         bs += 3; br.append("Sweep liquidite bas H1")
-    if swl15:       bs += 2; br.append("Sweep liquidite bas M15")
-    if in_ob(price, bob): bs += 3; br.append("Order Block haussier")
-    if near_fvg(price, bfv): bs += 2; br.append("FVG haussier")
-    if bh1 == 1:    bs += 2; br.append("BOS haussier H1")
-    if ch15 == 1:   bs += 2; br.append("CHoCH bullish M15")
-    if rv < 35:     bs += 2; br.append("RSI survendu " + str(round(rv,1)))
-    if rd == 1:     bs += 2; br.append("Divergence RSI bull")
-    if mv > 0:      bs += 1; br.append("MACD positif")
-    if price < bbl: bs += 2; br.append("Prix sous BB basse")
-    if stv < 20:    bs += 2; br.append("Stoch survendu " + str(round(stv,1)))
-    if price > e50: bs += 1; br.append("Prix > EMA50")
-    if e9 > e21:    bs += 1; br.append("EMA9 > EMA21")
-    if cv in ["BULL_PIN", "BULL_ENG"]: bs += 2; br.append("Bougie : " + cv)
-    if cv15 in ["BULL_PIN", "BULL_ENG"]: bs += 1; br.append("Bougie M15 : " + cv15)
-    if vsp:         bs += 1; br.append("Volume spike")
-    if nc["status"] == 2: bs += 1; br.append("Post-news opportunite")
-    # DXY context: if pair has USD as quote (EURUSD, GBPUSD, XAUUSD), USD weak (-1) = bullish
-    if usd_side == "quote" and dxy == -1: bs += 2; br.append("USD faible (DXY)")
-    if usd_side == "base" and dxy == 1: bs += 2; br.append("USD fort (DXY)")
-    if nc["bias"] == 1 and "USD" in pair_name: bs += 1; br.append("Biais news USD fort")
+    if trend_h4 == "BULL":    bs+=2; br.append("H4 haussier")
+    if e9>e21 and e21>e50:    bs+=2; br.append("EMA alignees hausse")
+    if cross_up:              bs+=1; br.append("Croisement EMA bull")
+    if m15_up:                bs+=1; br.append("M15 confirmation")
+    if sw_low:                bs+=2; br.append("Sweep liquidite bas")
+    if in_bull:               bs+=2; br.append("Order Block haussier")
+    if nr_bull:               bs+=1; br.append("FVG haussier")
+    if r < 35:                bs+=1; br.append(f"RSI survendu ({r:.1f})")
+    if rdiv == "BULL":        bs+=1; br.append("Divergence RSI bull")
+    if m > 0:                 bs+=1; br.append("MACD positif")
+    if price > e200:          bs+=1; br.append("Au-dessus EMA200")
+    if r_m15 > 50:            bs+=1; br.append(f"RSI M15 > 50")
+
+    # ── SCORE SELL ──
     ss = 0; sr = []
-    if sd1 == -1:   ss += 3; sr.append("D1 baissier")
-    if sh4 == -1:   ss += 2; sr.append("H4 LH+LL")
-    if sh1 == -1:   ss += 2; sr.append("H1 baissier")
-    if price < e200h4: ss += 1; sr.append("Prix < EMA200 H4")
-    if swh:         ss += 3; sr.append("Sweep liquidite haut H1")
-    if swh15:       ss += 2; sr.append("Sweep liquidite haut M15")
-    if in_ob(price, beb): ss += 3; sr.append("Order Block baissier")
-    if near_fvg(price, bfb): ss += 2; sr.append("FVG baissier")
-    if bh1 == -1:   ss += 2; sr.append("BOS baissier H1")
-    if ch15 == -1:  ss += 2; sr.append("CHoCH bearish M15")
-    if rv > 65:     ss += 2; sr.append("RSI surachete " + str(round(rv,1)))
-    if rd == -1:    ss += 2; sr.append("Divergence RSI bear")
-    if mv < 0:      ss += 1; sr.append("MACD negatif")
-    if price > bbu: ss += 2; sr.append("Prix > BB haute")
-    if stv > 80:    ss += 2; sr.append("Stoch surachete " + str(round(stv,1)))
-    if price < e50: ss += 1; sr.append("Prix < EMA50")
-    if e9 < e21:    ss += 1; sr.append("EMA9 < EMA21")
-    if cv in ["BEAR_PIN", "BEAR_ENG"]: ss += 2; sr.append("Bougie : " + cv)
-    if cv15 in ["BEAR_PIN", "BEAR_ENG"]: ss += 1; sr.append("Bougie M15 : " + cv15)
-    if vsp:         ss += 1; sr.append("Volume spike")
-    if nc["status"] == 2: ss += 1; sr.append("Post-news opportunite")
-    if usd_side == "quote" and dxy == 1: ss += 2; sr.append("USD fort (DXY)")
-    if usd_side == "base" and dxy == -1: ss += 2; sr.append("USD faible (DXY)")
-    if nc["bias"] == -1 and "USD" in pair_name: ss += 1; sr.append("Biais news USD faible")
-    THRESH = 12
-    MAX = 34
-    if bs >= THRESH and bs > ss:
-        sig = 1; sc = bs; reasons = br
-    elif ss >= THRESH and ss > bs:
-        sig = -1; sc = ss; reasons = sr
+    if trend_h4 == "BEAR":    ss+=2; sr.append("H4 baissier")
+    if e9<e21 and e21<e50:    ss+=2; sr.append("EMA alignees baisse")
+    if cross_dn:              ss+=1; sr.append("Croisement EMA bear")
+    if m15_dn:                ss+=1; sr.append("M15 confirmation")
+    if sw_high:               ss+=2; sr.append("Sweep liquidite haut")
+    if in_bear:               ss+=2; sr.append("Order Block baissier")
+    if nr_bear:               ss+=1; sr.append("FVG baissier")
+    if r > 65:                ss+=1; sr.append(f"RSI surachete ({r:.1f})")
+    if rdiv == "BEAR":        ss+=1; sr.append("Divergence RSI bear")
+    if m < 0:                 ss+=1; sr.append("MACD negatif")
+    if price < e200:          ss+=1; sr.append("En-dessous EMA200")
+    if r_m15 < 50:            ss+=1; sr.append(f"RSI M15 < 50")
+
+    # Appliquer poids du regime
+    bs_weighted = int(bs * regime_weight)
+    ss_weighted = int(ss * regime_weight)
+
+    # Signal final
+    if bs_weighted >= min_score and bs_weighted > ss_weighted:
+        signal = "BUY"; score = bs_weighted; reasons = br
+    elif ss_weighted >= min_score and ss_weighted > bs_weighted:
+        signal = "SELL"; score = ss_weighted; reasons = sr
     else:
         return None
-    conf = min(95, int(sc / MAX * 100))
-    sh_pts, sl_pts = swings(H1["h"], H1["l"])
-    if sig == 1:
-        sl_s = sl_pts[-1][1] - atrv * 0.3 if sl_pts else price - atrv * 1.5
-        sl = min(sl_s, price - atrv * 1.5)
-        tp1 = price + (price - sl) * 1.5
+
+    # SL/TP
+    sh_pts, sl_pts = swing_points(h, l)
+    if signal == "BUY":
+        sl = min(sl_pts[-1][1]-atr_v*0.5 if sl_pts else price-atr_v*1.5, price-atr_v*1.5)
+        tp1 = price + (price-sl)*2
+        tp2 = price + (price-sl)*3
     else:
-        sl_s = sh_pts[-1][1] + atrv * 0.3 if sh_pts else price + atrv * 1.5
-        sl = max(sl_s, price + atrv * 1.5)
-        tp1 = price - (sl - price) * 1.5
-    pip_size = 0.01 if "JPY" in pair_name else (0.1 if "XAU" in pair_name else 0.0001)
-    sl_pips = abs(price - sl) / pip_size
-    pv = next((p["pip_val"] for p in PAIRS if p["name"] == pair_name), 10)
-    lm = 0.5 if nc["status"] == 3 else 1.0
-    lv = lot_size(sl_pips, pv, lm * kz_mult)
-    sh4_txt = "BULLISH" if sh4 == 1 else ("BEARISH" if sh4 == -1 else "NEUTRAL")
-    return dict(sig=sig, sc=sc, MAX=MAX, conf=conf, price=price, sl=sl,
-                tp1=tp1, sl_pips=sl_pips, lot=lv,
-                rsi=rv, stoch=stv, sh4=sh4_txt,
-                cv=cv, vsp=vsp, reasons=reasons[:8], dec=dec, nc=nc)
+        sl = max(sh_pts[-1][1]+atr_v*0.5 if sh_pts else price+atr_v*1.5, price+atr_v*1.5)
+        tp1 = price - (sl-price)*2
+        tp2 = price - (sl-price)*3
 
-def check(pair, events, dxy):
-    name = pair["name"]
-    if not daily_ok(): return
-    nc = classify_news(name, events)
-    if nc["status"] == 1:
-        key = name + nc["reason"]
-        if last_news_alert.get(name) != key:
-            last_news_alert[name] = key
-            send("PAUSE " + name + chr(10) + nc["reason"] + chr(10) + nc["action"])
-        return
-    last_news_alert[name] = None
-    kz_name, kz_mult = kill_zone()
-    if kz_mult < 0.7: return
-    res = analyze(name, pair["kraken"], nc, kz_mult, dxy, pair["usd_side"])
-    if not res: return
-    sig = res["sig"]
-    sig_txt = "ACHAT" if sig == 1 else "VENTE"
-    if correlated_blocked(name, sig):
-        return
-    cur = open_positions.get(name)
-    cur_sig = cur["sig"] if isinstance(cur, dict) else cur
-    if cur_sig and cur_sig != sig:
-        cur_txt = "ACHAT" if cur_sig == 1 else "VENTE"
-        send("RETOURNEMENT " + name + chr(10) + "Ferme " + cur_txt + chr(10) + "Nouveau : " + sig_txt)
-    key = name + str(sig)
-    if last_signals.get(key): return
-    last_signals[key] = True
-    open_positions[name] = dict(sig=sig, entry=res["price"], sl=res["sl"], tp=res["tp1"], opened=datetime.now().isoformat())
-    daily["count"] += 1
-    dec = res["dec"]
-    icon = "BUY" if sig == 1 else "SELL"
-    nc_info = res["nc"]
-    msg = icon + " SIGNAL " + sig_txt + " - " + name + chr(10)
-    msg += "========================" + chr(10)
-    msg += "Prix  : " + str(round(res["price"], dec)) + chr(10)
-    msg += "SL    : " + str(round(res["sl"], dec)) + " (" + str(round(res["sl_pips"])) + " pips)" + chr(10)
-    msg += "TP    : " + str(round(res["tp1"], dec)) + chr(10)
-    msg += "Ratio : 1:1.5" + chr(10)
-    msg += "========================" + chr(10)
-    msg += "RSI     : " + str(round(res["rsi"],1)) + chr(10)
-    msg += "Stoch   : " + str(round(res["stoch"],1)) + chr(10)
-    msg += "H4      : " + res["sh4"] + chr(10)
-    msg += "Session : " + kz_name + chr(10)
-    msg += "Score   : " + str(res["sc"]) + "/" + str(res["MAX"]) + chr(10)
-    msg += "Confiance: " + str(res["conf"]) + "%" + chr(10)
-    if nc_info["status"] != 0:
-        msg += "========================" + chr(10)
-        msg += "NEWS : " + nc_info["reason"] + chr(10)
-        msg += nc_info["action"] + chr(10)
-    msg += "========================" + chr(10)
-    for r in res["reasons"]:
-        msg += "- " + r + chr(10)
-    msg += chr(10) + "Signal indicatif - risque 1% max"
-    send(msg)
-    print("[" + datetime.now().strftime("%H:%M") + "] " + name + " " + sig_txt + " " + str(res["conf"]) + "%")
+    # Lot
+    sl_pips = abs(price-sl) / (0.01 if is_jpy else 0.0001)
+    risk_amt = CAPITAL * risk_pct / 100
+    lot = round(max(0.01, min(risk_amt / (sl_pips * 10), 2.0)), 2)
 
-def check_levels():
-    for name in list(open_positions.keys()):
-        pos = open_positions[name]
-        if not isinstance(pos, dict): continue
-        pair = next((p for p in PAIRS if p["name"] == name), None)
-        if not pair: continue
-        m15 = candles(pair["kraken"], 15, 5)
-        if not m15: continue
-        last_high = m15["h"][-1]
-        last_low = m15["l"][-1]
-        sig = pos["sig"]
-        entry = pos["entry"]
-        sl = pos["sl"]
-        tp = pos["tp"]
-        pip_size = 0.01 if "JPY" in name else (0.1 if "XAU" in name else 0.0001)
-        hit_sl = (sig == 1 and last_low <= sl) or (sig == -1 and last_high >= sl)
-        hit_tp = (sig == 1 and last_high >= tp) or (sig == -1 and last_low <= tp)
-        if hit_sl:
-            pips = -abs(entry - sl) / pip_size
-            sig_txt = "ACHAT" if sig == 1 else "VENTE"
-            send("SL TOUCHE - " + name + chr(10) + "Position: " + sig_txt + chr(10) + "Entree: " + str(round(entry,5)) + chr(10) + "SL: " + str(round(sl,5)) + chr(10) + "Resultat: " + str(int(pips)) + " pips")
-            add_trade(name, sig_txt, entry, sl, int(pips), "SL")
-            del open_positions[name]
-            daily["losses"] += 1
-            for k in list(last_signals.keys()):
-                if k.startswith(name): del last_signals[k]
-        elif hit_tp:
-            pips = abs(tp - entry) / pip_size
-            sig_txt = "ACHAT" if sig == 1 else "VENTE"
-            send("TP ATTEINT - " + name + chr(10) + "Position: " + sig_txt + chr(10) + "Entree: " + str(round(entry,5)) + chr(10) + "TP: " + str(round(tp,5)) + chr(10) + "Resultat: +" + str(int(pips)) + " pips")
-            add_trade(name, sig_txt, entry, tp, int(pips), "TP")
-            del open_positions[name]
-            for k in list(last_signals.keys()):
-                if k.startswith(name): del last_signals[k]
+    return {
+        "signal":  signal,
+        "pair":    pair["name"],
+        "entry":   round(price, dec),
+        "sl":      round(sl, dec),
+        "tp1":     round(tp1, dec),
+        "tp2":     round(tp2, dec),
+        "lot":     lot,
+        "score":   score,
+        "regime":  regime,
+        "reasons": reasons[:6],
+        "dec":     dec
+    }
 
-def daily_recap():
-    global last_daily_recap
-    now = datetime.now()
-    today = now.strftime("%Y-%m-%d")
-    if now.hour < 22: return
-    if last_daily_recap == today: return
-    s = load_stats()
-    todays = [t for t in s["trades"] if t["date"] == today]
-    if not todays:
-        last_daily_recap = today
-        return
-    by_pair = {}
-    for t in todays:
-        p = t["pair"]
-        if p not in by_pair: by_pair[p] = dict(w=0, l=0, pips=0)
-        if t["status"] == "TP": by_pair[p]["w"] += 1
-        else: by_pair[p]["l"] += 1
-        by_pair[p]["pips"] += t["pips"]
-    msg = "RECAP DU JOUR - " + now.strftime("%d/%m/%Y") + chr(10)
-    msg += "========================" + chr(10)
-    total_pips = 0; total_w = 0; total_l = 0
-    for p, d in by_pair.items():
-        sign = "+" if d["pips"] >= 0 else ""
-        msg += p + " : " + str(d["w"]+d["l"]) + " trades - " + str(d["w"]) + "W " + str(d["l"]) + "L - " + sign + str(d["pips"]) + " pips" + chr(10)
-        total_pips += d["pips"]; total_w += d["w"]; total_l += d["l"]
-    msg += "========================" + chr(10)
-    total = total_w + total_l
-    wr = int(100 * total_w / total) if total > 0 else 0
-    sign = "+" if total_pips >= 0 else ""
-    msg += "Total : " + str(total) + " trades - " + str(wr) + "% win rate" + chr(10)
-    msg += "Pips  : " + sign + str(total_pips) + " pips"
-    send(msg)
-    last_daily_recap = today
+# ═══════════════════════════════════════════════════
+# BOUCLE PRINCIPALE
+# ═══════════════════════════════════════════════════
+last_signals = {}
+last_news_alert = {}
 
-def weekly_recap():
-    global last_weekly_recap
-    now = datetime.now()
-    if now.weekday() != 6 or now.hour < 22: return
-    week = now.strftime("%Y-W%U")
-    if last_weekly_recap == week: return
-    s = load_stats()
-    week_start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
-    week_trades = [t for t in s["trades"] if t["date"] >= week_start]
-    if not week_trades:
-        last_weekly_recap = week
-        return
-    by_pair = {}
-    for t in week_trades:
-        p = t["pair"]
-        if p not in by_pair: by_pair[p] = dict(w=0, l=0, pips=0)
-        if t["status"] == "TP": by_pair[p]["w"] += 1
-        else: by_pair[p]["l"] += 1
-        by_pair[p]["pips"] += t["pips"]
-    msg = "RECAP HEBDO" + chr(10)
-    msg += "========================" + chr(10)
-    total_pips = 0; total_w = 0; total_l = 0
-    for p, d in by_pair.items():
-        sign = "+" if d["pips"] >= 0 else ""
-        msg += p + " : " + str(d["w"]+d["l"]) + " trades - " + str(d["w"]) + "W " + str(d["l"]) + "L - " + sign + str(d["pips"]) + " pips" + chr(10)
-        total_pips += d["pips"]; total_w += d["w"]; total_l += d["l"]
-    msg += "========================" + chr(10)
-    total = total_w + total_l
-    wr = int(100 * total_w / total) if total > 0 else 0
-    sign = "+" if total_pips >= 0 else ""
-    msg += "Total : " + str(total) + " trades - " + str(wr) + "% win rate" + chr(10)
-    msg += "Pips  : " + sign + str(total_pips) + " pips"
-    send(msg)
-    last_weekly_recap = week
+def trading_loop():
+    global current_signal
 
-def reset_check():
-    global last_reset
-    if (datetime.now() - last_reset).seconds > 14400:
-        last_signals.clear()
-        last_reset = datetime.now()
+    send_telegram(
+        f"ARBI BOT CERVEAU v1.0 DEMARRE\n"
+        f"Analyse: SMC + EMA + RSI + MACD + ATR\n"
+        f"Regime: Tendance/Range/Instable\n"
+        f"ML: Apprentissage actif\n"
+        f"Serveur: actif sur /signal\n"
+        f"En attente de setups..."
+    )
 
-now = datetime.now().strftime("%d/%m/%Y %H:%M")
-send("ARBI BOT PRO v8 - " + now + chr(10) + "Paires : EUR/USD GBP/USD USD/JPY XAU/USD" + chr(10) + "Kill Zones + SMC + News Pro + DXY" + chr(10) + "Anti-correlation + Recap auto" + chr(10) + "Seuil : 12/34 confluences" + chr(10) + "Mode 100% automatique")
-print("ArbiBot Pro v8 demarre")
+    while True:
+        sess_name, sess_active = get_session()
 
-while True:
-    try:
-        events = get_news()
-        dxy = dxy_bias()
-        for p in PAIRS:
+        if not sess_active:
+            current_signal = {"signal": "NONE", "pair": "", "timestamp": str(datetime.now())}
+            time.sleep(600)
+            continue
+
+        brain = load_data()
+
+        for pair in PAIRS:
             try:
-                check(p, events, dxy)
+                # News filter
+                blocked, news = is_news_blocked(pair["name"])
+                if blocked:
+                    key = pair["name"] + str([n["title"] for n in news])
+                    if last_news_alert.get(pair["name"]) != key:
+                        last_news_alert[pair["name"]] = key
+                        msg = f"NEWS ROUGE — {pair['name']}\n"
+                        for n in news:
+                            msg += f"• {n['title']} dans {n['mins']}min\n"
+                        msg += "Trade bloque !"
+                        send_telegram(msg)
+                    continue
+
+                # Analyse
+                result = analyze(pair)
+                if not result: continue
+
+                sig = result["signal"]
+                if last_signals.get(pair["name"]) == sig: continue
+                last_signals[pair["name"]] = sig
+
+                # Mettre a jour signal pour Bot 2
+                current_signal = {
+                    "signal":    sig,
+                    "pair":      result["pair"],
+                    "entry":     result["entry"],
+                    "sl":        result["sl"],
+                    "tp1":       result["tp1"],
+                    "tp2":       result["tp2"],
+                    "lot":       result["lot"],
+                    "score":     result["score"],
+                    "regime":    result["regime"],
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+
+                # Telegram
+                dec = result["dec"]
+                icon = "BUY" if sig == "BUY" else "SELL"
+                msg  = f"{icon} {result['pair']}\n"
+                msg += "============================\n"
+                msg += f"Entree : {result['entry']:.{dec}f}\n"
+                msg += f"SL     : {result['sl']:.{dec}f}\n"
+                msg += f"TP1    : {result['tp1']:.{dec}f} (1:2)\n"
+                msg += f"TP2    : {result['tp2']:.{dec}f} (1:3)\n"
+                msg += f"Lot    : {result['lot']}\n"
+                msg += "============================\n"
+                msg += f"Score  : {result['score']}/{brain['params']['min_score']} min\n"
+                msg += f"Regime : {result['regime']}\n"
+                msg += f"Session: {sess_name}\n"
+                msg += "============================\n"
+                msg += "Confluences :\n"
+                for r in result["reasons"]:
+                    msg += f"• {r}\n"
+                msg += f"Signal envoye a Bot 2 (Copieur)"
+                send_telegram(msg)
+                print(f"[SIGNAL] {result['pair']} {sig} score={result['score']} regime={result['regime']}")
+
             except Exception as e:
-                print("Error " + p["name"] + ": " + str(e))
-            time.sleep(2)
-        check_levels()
-        daily_recap()
-        weekly_recap()
-        reset_check()
-        print("[" + datetime.now().strftime("%H:%M") + "] Cycle ok DXY=" + str(dxy))
-        time.sleep(SCAN_INTERVAL)
-    except KeyboardInterrupt:
-        break
-    except Exception as e:
-        print("Erreur: " + str(e))
-        time.sleep(60)
+                print(f"Erreur {pair['name']}: {e}")
+            time.sleep(3)
+
+        time.sleep(300)
+
+# ═══════════════════════════════════════════════════
+# DEMARRAGE
+# ═══════════════════════════════════════════════════
+if __name__ == "__main__":
+    # Lancer le bot dans un thread separe
+    bot_thread = Thread(target=trading_loop, daemon=True)
+    bot_thread.start()
+
+    # Lancer le serveur Flask
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Serveur Flask demarre sur port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
