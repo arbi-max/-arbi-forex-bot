@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ARBI BOT CERVEAU v1.0
+ARBI BOT CERVEAU v2.0
 Bot 1 — Cerveau (Railway/Python)
 - Analyse SMC avancee
 - Detection de regime
@@ -11,6 +11,7 @@ Bot 1 — Cerveau (Railway/Python)
 - Serveur web Flask
 - Recoit resultats de Bot 2
 - Apprend de chaque trade
+- v2.0 : Reset signal apres lecture + Filtre week-end
 """
 
 import requests
@@ -60,8 +61,12 @@ current_signal = {
 
 @app.route("/signal", methods=["GET"])
 def get_signal():
-    """Bot 2 interroge ce endpoint pour obtenir le signal"""
-    return jsonify(current_signal)
+    """Bot 2 interroge ce endpoint — signal reset apres lecture"""
+    global current_signal
+    signal_to_send = current_signal.copy()
+    # Reset apres lecture pour eviter duplication
+    current_signal["signal"] = "NONE"
+    return jsonify(signal_to_send)
 
 @app.route("/result", methods=["POST"])
 def receive_result():
@@ -111,6 +116,23 @@ def status():
         "risk_pct": brain["params"]["risk_pct"],
         "current_signal": current_signal
     })
+
+# ═══════════════════════════════════════════════════
+# FILTRE WEEK-END
+# ═══════════════════════════════════════════════════
+def is_weekend():
+    """Bloque vendredi 22h UTC -> dimanche 22h UTC"""
+    now = datetime.now(timezone.utc)
+    wd  = now.weekday()  # 0=lundi, 4=vendredi, 5=samedi, 6=dimanche
+    h   = now.hour
+
+    if wd == 4 and h >= 22:   # Vendredi soir
+        return True
+    if wd == 5:               # Samedi
+        return True
+    if wd == 6 and h < 22:   # Dimanche avant 22h
+        return True
+    return False
 
 # ═══════════════════════════════════════════════════
 # PERSISTANCE ET APPRENTISSAGE
@@ -279,19 +301,16 @@ def detect_regime(h, l, c, h4_c):
     e200 = ema(c, 100)
     price = c[-1]
 
-    # Volatilite
     atr_ratio = atr_v / atr_avg if atr_avg > 0 else 1
 
-    # Tendance H4
     e50_h4  = ema(h4_c, 50)
     e200_h4 = ema(h4_c, 100)
     trend_h4 = "BULL" if e50_h4 > e200_h4 else "BEAR"
 
-    # Range detection
     highs = h[-20:]
     lows  = l[-20:]
     range_size = (max(highs) - min(lows)) / price
-    is_range = range_size < 0.005  # Range < 0.5%
+    is_range = range_size < 0.005
 
     if atr_ratio > 2.5:
         return "INSTABLE", trend_h4
@@ -419,17 +438,12 @@ def analyze(pair):
     is_jpy = "JPY" in pair["name"]
     dec = 3 if is_jpy else 5
 
-    # Detection regime
     regime, trend_h4 = detect_regime(h, l, c, H4["c"])
-
-    # Bloquer si instable
     if regime == "INSTABLE": return None
 
-    # Poids du regime
     regime_key = regime.replace("TREND_BULL","TREND").replace("TREND_BEAR","TREND")
     regime_weight = brain["params"]["regime_weights"].get(regime_key, 1.0)
 
-    # Indicateurs H1
     e9   = ema(c, 9);   e21  = ema(c, 21)
     e50  = ema(c, 50);  e200 = ema(c, 100)
     e9p  = ema(c[:-1], 9); e21p = ema(c[:-1], 21)
@@ -438,14 +452,12 @@ def analyze(pair):
     atr_v = atr(h, l, c)
     rdiv = rsi_divergence(c)
 
-    # Indicateurs M15
     e9_m15  = ema(M15["c"], 9)
     e21_m15 = ema(M15["c"], 21)
     e9_m15p = ema(M15["c"][:-1], 9)
     e21_m15p= ema(M15["c"][:-1], 21)
     r_m15   = rsi(M15["c"])
 
-    # SMC
     bull_ob, bear_ob = detect_order_blocks(o, h, l, c)
     bull_fvg, bear_fvg = detect_fvg(h, l)
     sw_low  = sweep_low(h, l, c)
@@ -460,7 +472,6 @@ def analyze(pair):
     m15_up   = e9_m15p <= e21_m15p and e9_m15 > e21_m15
     m15_dn   = e9_m15p >= e21_m15p and e9_m15 < e21_m15
 
-    # ── SCORE BUY ──
     bs = 0; br = []
     if trend_h4 == "BULL":    bs+=2; br.append("H4 haussier")
     if e9>e21 and e21>e50:    bs+=2; br.append("EMA alignees hausse")
@@ -475,7 +486,6 @@ def analyze(pair):
     if price > e200:          bs+=1; br.append("Au-dessus EMA200")
     if r_m15 > 50:            bs+=1; br.append(f"RSI M15 > 50")
 
-    # ── SCORE SELL ──
     ss = 0; sr = []
     if trend_h4 == "BEAR":    ss+=2; sr.append("H4 baissier")
     if e9<e21 and e21<e50:    ss+=2; sr.append("EMA alignees baisse")
@@ -490,11 +500,9 @@ def analyze(pair):
     if price < e200:          ss+=1; sr.append("En-dessous EMA200")
     if r_m15 < 50:            ss+=1; sr.append(f"RSI M15 < 50")
 
-    # Appliquer poids du regime
     bs_weighted = int(bs * regime_weight)
     ss_weighted = int(ss * regime_weight)
 
-    # Signal final
     if bs_weighted >= min_score and bs_weighted > ss_weighted:
         signal = "BUY"; score = bs_weighted; reasons = br
     elif ss_weighted >= min_score and ss_weighted > bs_weighted:
@@ -502,7 +510,6 @@ def analyze(pair):
     else:
         return None
 
-    # SL/TP
     sh_pts, sl_pts = swing_points(h, l)
     if signal == "BUY":
         sl = min(sl_pts[-1][1]-atr_v*0.5 if sl_pts else price-atr_v*1.5, price-atr_v*1.5)
@@ -513,7 +520,6 @@ def analyze(pair):
         tp1 = price - (sl-price)*2
         tp2 = price - (sl-price)*3
 
-    # Lot
     sl_pips = abs(price-sl) / (0.01 if is_jpy else 0.0001)
     risk_amt = CAPITAL * risk_pct / 100
     lot = round(max(0.01, min(risk_amt / (sl_pips * 10), 2.0)), 2)
@@ -542,15 +548,26 @@ def trading_loop():
     global current_signal
 
     send_telegram(
-        f"ARBI BOT CERVEAU v1.0 DEMARRE\n"
+        f"ARBI BOT CERVEAU v2.0 DEMARRE\n"
         f"Analyse: SMC + EMA + RSI + MACD + ATR\n"
         f"Regime: Tendance/Range/Instable\n"
         f"ML: Apprentissage actif\n"
+        f"Filtre week-end: ACTIF\n"
+        f"Reset signal auto: ACTIF\n"
         f"Serveur: actif sur /signal\n"
         f"En attente de setups..."
     )
 
     while True:
+
+        # ── FILTRE WEEK-END ──
+        if is_weekend():
+            now = datetime.now(timezone.utc)
+            print(f"[WEEK-END] Marche ferme - {now.strftime('%A %H:%M')} UTC")
+            current_signal = {"signal": "NONE", "pair": "", "timestamp": str(datetime.now())}
+            time.sleep(1800)  # Verifier toutes les 30 min
+            continue
+
         sess_name, sess_active = get_session()
 
         if not sess_active:
@@ -629,11 +646,9 @@ def trading_loop():
 # DEMARRAGE
 # ═══════════════════════════════════════════════════
 if __name__ == "__main__":
-    # Lancer le bot dans un thread separe
     bot_thread = Thread(target=trading_loop, daemon=True)
     bot_thread.start()
 
-    # Lancer le serveur Flask
     port = int(os.environ.get("PORT", 5000))
     print(f"Serveur Flask demarre sur port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
