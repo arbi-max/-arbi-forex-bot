@@ -15,7 +15,7 @@ RISK_PERCENT = 1.0        # Risque 1% du capital par trade (dynamique)
 RR_RATIO = 2.0            # Risk/Reward ratio
 SPREAD_PIPS = 1.5         # Spread EUR/USD en pips
 PIP_VALUE = 0.0001        # 1 pip = 0.0001 pour EUR/USD
-SCORE_MIN = 4             # Score minimum abaissé à 4 (au lieu de 6)
+SCORE_MIN = 5             # Score minimum remonté à 5
 
 # =========================================
 # DOWNLOAD DATA — 15M + 1H (HTF filter)
@@ -85,6 +85,15 @@ df_15m["LL"] = df_15m["Low"] < df_15m["Low"].shift(1)
 df_1h["EMA50_1h"] = df_1h["Close"].ewm(span=50).mean()
 df_1h["EMA200_1h"] = df_1h["Close"].ewm(span=200).mean()
 
+# RSI sur H1
+delta_1h = df_1h["Close"].diff()
+gain_1h = delta_1h.clip(lower=0)
+loss_1h = -delta_1h.clip(upper=0)
+avg_gain_1h = gain_1h.rolling(14).mean()
+avg_loss_1h = loss_1h.rolling(14).mean()
+rs_1h = avg_gain_1h / avg_loss_1h
+df_1h["RSI_1h"] = 100 - (100 / (1 + rs_1h))
+
 df_15m.dropna(inplace=True)
 df_1h.dropna(inplace=True)
 
@@ -104,20 +113,23 @@ breakevens = 0
 spread = SPREAD_PIPS * PIP_VALUE
 
 # =========================================
-# HELPER — GET 1H TREND AT TIME T
+# HELPER — GET 1H TREND + RSI AT TIME T
 # =========================================
 
-def get_htf_trend(timestamp):
-    """Retourne 'bull', 'bear' ou 'neutral' selon la tendance H1"""
+def get_htf_data(timestamp):
+    """Retourne tendance H1 + RSI H1"""
     past_1h = df_1h[df_1h.index <= timestamp]
     if len(past_1h) == 0:
-        return "neutral"
+        return "neutral", 50
     last = past_1h.iloc[-1]
+    rsi_1h = float(last["RSI_1h"]) if not pd.isna(last["RSI_1h"]) else 50
     if last["EMA50_1h"] > last["EMA200_1h"]:
-        return "bull"
+        trend = "bull"
     elif last["EMA50_1h"] < last["EMA200_1h"]:
-        return "bear"
-    return "neutral"
+        trend = "bear"
+    else:
+        trend = "neutral"
+    return trend, rsi_1h
 
 # =========================================
 # HELPER — RISK DYNAMIQUE
@@ -138,10 +150,7 @@ for i in range(200, len(df_15m) - 20):
     current = df_15m.iloc[i]
     timestamp = df_15m.index[i]
 
-    # =====================================
-    # CORRECTION LOOK-AHEAD :
-    # Entrée à l'OPEN de la bougie suivante
-    # =====================================
+    # Entrée à l'OPEN de la bougie suivante (no look-ahead)
     next_candle = df_15m.iloc[i + 1]
     entry_price = float(next_candle["Open"])
 
@@ -162,20 +171,21 @@ for i in range(200, len(df_15m) - 20):
         continue
 
     # =====================================
-    # HTF TREND FILTER (H1)
+    # HTF TREND + RSI FILTER (H1)
     # =====================================
 
-    htf_trend = get_htf_trend(timestamp)
+    htf_trend, rsi_1h = get_htf_data(timestamp)
+
+    # Filtre RSI H1 : pas en zone extrême (évite surachat/survente)
+    if rsi_1h > 70 or rsi_1h < 30:
+        continue
 
     score_buy = 0
     score_sell = 0
     reasons_buy = []
     reasons_sell = []
 
-    # =====================================
     # EMA TREND
-    # =====================================
-
     if current["EMA20"] > current["EMA50"]:
         score_buy += 2
         reasons_buy.append("EMA20 > EMA50")
@@ -184,10 +194,7 @@ for i in range(200, len(df_15m) - 20):
         score_sell += 2
         reasons_sell.append("EMA20 < EMA50")
 
-    # =====================================
     # EMA200 FILTER
-    # =====================================
-
     if current["Close"] > current["EMA200"]:
         score_buy += 1
         reasons_buy.append("Above EMA200")
@@ -196,10 +203,7 @@ for i in range(200, len(df_15m) - 20):
         score_sell += 1
         reasons_sell.append("Below EMA200")
 
-    # =====================================
     # RSI
-    # =====================================
-
     if current["RSI"] > 55:
         score_buy += 1
         reasons_buy.append("RSI bullish")
@@ -208,10 +212,7 @@ for i in range(200, len(df_15m) - 20):
         score_sell += 1
         reasons_sell.append("RSI bearish")
 
-    # =====================================
     # MACD
-    # =====================================
-
     if current["MACD"] > 0:
         score_buy += 1
         reasons_buy.append("MACD bullish")
@@ -220,10 +221,7 @@ for i in range(200, len(df_15m) - 20):
         score_sell += 1
         reasons_sell.append("MACD bearish")
 
-    # =====================================
     # MARKET STRUCTURE
-    # =====================================
-
     if current["HH"]:
         score_buy += 1
         reasons_buy.append("Higher High")
@@ -239,9 +237,9 @@ for i in range(200, len(df_15m) - 20):
     if (
         score_buy >= SCORE_MIN
         and score_buy > score_sell
-        and htf_trend == "bull"          # HTF doit être haussier
+        and htf_trend == "bull"
     ):
-        entry = entry_price + spread     # Spread appliqué à l'achat
+        entry = entry_price + spread
 
         sl = entry - (float(current["ATR"]) * 1.5)
         risk_pips = entry - sl
@@ -252,16 +250,33 @@ for i in range(200, len(df_15m) - 20):
         result = None
         profit = 0
 
+        # TRAILING STOP — move SL to breakeven after 1R
+        breakeven_triggered = False
+        trailing_sl = sl
+        breakeven_level = entry + risk_pips  # +1R
+
         for j in range(i + 2, i + 21):
             future = df_15m.iloc[j]
 
-            if future["Low"] <= sl:
-                result = "LOSS"
-                profit = -risk_amount
-                losses += 1
+            # Activer breakeven si prix atteint +1R
+            if not breakeven_triggered and float(future["High"]) >= breakeven_level:
+                trailing_sl = entry  # SL monte à l'entrée
+                breakeven_triggered = True
+
+            # Check SL (avec trailing)
+            if float(future["Low"]) <= trailing_sl:
+                if breakeven_triggered:
+                    result = "BREAKEVEN"
+                    profit = 0
+                    breakevens += 1
+                else:
+                    result = "LOSS"
+                    profit = -risk_amount
+                    losses += 1
                 break
 
-            if future["High"] >= tp:
+            # Check TP
+            if float(future["High"]) >= tp:
                 result = "WIN"
                 profit = reward_amount
                 wins += 1
@@ -287,6 +302,7 @@ for i in range(200, len(df_15m) - 20):
             "signal": "BUY",
             "score": score_buy,
             "htf_trend": htf_trend,
+            "rsi_1h": round(rsi_1h, 1),
             "entry": round(entry, 5),
             "sl": round(sl, 5),
             "tp": round(tp, 5),
@@ -304,9 +320,9 @@ for i in range(200, len(df_15m) - 20):
     elif (
         score_sell >= SCORE_MIN
         and score_sell > score_buy
-        and htf_trend == "bear"          # HTF doit être baissier
+        and htf_trend == "bear"
     ):
-        entry = entry_price - spread     # Spread appliqué à la vente
+        entry = entry_price - spread
 
         sl = entry + (float(current["ATR"]) * 1.5)
         risk_pips = sl - entry
@@ -317,16 +333,33 @@ for i in range(200, len(df_15m) - 20):
         result = None
         profit = 0
 
+        # TRAILING STOP — move SL to breakeven after 1R
+        breakeven_triggered = False
+        trailing_sl = sl
+        breakeven_level = entry - risk_pips  # -1R
+
         for j in range(i + 2, i + 21):
             future = df_15m.iloc[j]
 
-            if future["High"] >= sl:
-                result = "LOSS"
-                profit = -risk_amount
-                losses += 1
+            # Activer breakeven si prix atteint -1R
+            if not breakeven_triggered and float(future["Low"]) <= breakeven_level:
+                trailing_sl = entry  # SL descend à l'entrée
+                breakeven_triggered = True
+
+            # Check SL (avec trailing)
+            if float(future["High"]) >= trailing_sl:
+                if breakeven_triggered:
+                    result = "BREAKEVEN"
+                    profit = 0
+                    breakevens += 1
+                else:
+                    result = "LOSS"
+                    profit = -risk_amount
+                    losses += 1
                 break
 
-            if future["Low"] <= tp:
+            # Check TP
+            if float(future["Low"]) <= tp:
                 result = "WIN"
                 profit = reward_amount
                 wins += 1
@@ -352,6 +385,7 @@ for i in range(200, len(df_15m) - 20):
             "signal": "SELL",
             "score": score_sell,
             "htf_trend": htf_trend,
+            "rsi_1h": round(rsi_1h, 1),
             "entry": round(entry, 5),
             "sl": round(sl, 5),
             "tp": round(tp, 5),
@@ -391,15 +425,15 @@ with open("report.json", "w") as f:
     json.dump(report, f, indent=4)
 
 print("====================================")
-print("BACKTEST V2 TERMINÉ")
+print("BACKTEST V3 TERMINÉ")
 print("====================================")
-print(f"Trades       : {total_trades}")
-print(f"Wins         : {wins}")
-print(f"Losses       : {losses}")
-print(f"Breakevens   : {breakevens}")
-print(f"Winrate      : {winrate} %")
-print(f"Balance init : {INITIAL_BALANCE} $")
+print(f"Trades        : {total_trades}")
+print(f"Wins          : {wins}")
+print(f"Losses        : {losses}")
+print(f"Breakevens    : {breakevens}")
+print(f"Winrate       : {winrate} %")
+print(f"Balance init  : {INITIAL_BALANCE} $")
 print(f"Balance finale: {round(balance, 2)} $")
-print(f"PnL total    : {round(balance - INITIAL_BALANCE, 2)} $")
-print(f"Max Drawdown : {round(max_drawdown, 2)} $")
+print(f"PnL total     : {round(balance - INITIAL_BALANCE, 2)} $")
+print(f"Max Drawdown  : {round(max_drawdown, 2)} $")
 print("====================================")
